@@ -228,6 +228,9 @@ func TestTypeOf(t *testing.T) {
 			t.Errorf("TypeOf(%T) = %s, want %s", tt.obj, got, tt.want)
 		}
 	}
+	if a := New(CauseSpontaneous, 1); a.First() != nil || a.Len() != 0 {
+		t.Error("an ASDU without objects has no first object")
+	}
 	if New(CauseSpontaneous, 1).Type != 0 {
 		t.Error("New without objects should leave Type zero")
 	}
@@ -274,6 +277,7 @@ func TestEncodeErrors(t *testing.T) {
 		p    Params
 		want error
 	}{
+		{"nil ASDU", nil, IEC104, ErrInvalidValue},
 		{"too many objects", New(CauseSpontaneous, 1, many...), IEC104, ErrInvalidValue},
 		{"too long", New(CauseSpontaneous, 1, big...), IEC104, ErrTooLong},
 		{"type mismatch", &ASDU{Type: M_DP_NA_1, Objects: []InformationObject{SinglePoint{}}}, IEC104, ErrTypeMismatch},

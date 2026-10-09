@@ -4,8 +4,10 @@ package iec104
 
 import (
 	"net"
+	"time"
 
 	"github.com/otfabric/go-iec104/apci"
+	"github.com/otfabric/go-iec104/asdu"
 )
 
 // Metrics is an optional callback interface for observing connections and
@@ -54,3 +56,38 @@ func (NopMetrics) OnFrameReceived(net.Addr, apci.Frame, int) {}
 
 // OnDecodeError does nothing.
 func (NopMetrics) OnDecodeError(net.Addr, error) {}
+
+// RequestMetrics is an optional extension of [Metrics] for a client. When
+// the value given to client.WithMetrics also implements it, the client
+// reports every request method call (Interrogate, Command, Read, ...).
+//
+// The callbacks are request-level: OnRequest fires once before the first
+// attempt and OnRequestDone once with the final outcome, whose duration
+// includes retries and their delays. OnRetry fires for each attempt that
+// failed and will be repeated.
+//
+// remote is the address of the station, or nil while the client has never
+// been connected. Implementations must be safe for concurrent use and must
+// not block.
+type RequestMetrics interface {
+	// OnRequest is called before a request is sent.
+	OnRequest(remote net.Addr, t asdu.TypeID, ca asdu.CommonAddr)
+
+	// OnRequestDone is called with the final outcome. err is nil on
+	// success; classify failures with errors.Is and errors.As
+	// (*NegativeError, context.DeadlineExceeded, ErrConnectionLost, ...).
+	OnRequestDone(remote net.Addr, t asdu.TypeID, ca asdu.CommonAddr, duration time.Duration, err error)
+
+	// OnRetry is called when attempt (1 for the first) failed with err and
+	// the request is about to be tried again.
+	OnRetry(remote net.Addr, t asdu.TypeID, ca asdu.CommonAddr, attempt int, err error)
+}
+
+// HandlerMetrics is an optional extension of [Metrics] for a server. When
+// the value given to server.WithMetrics also implements it, the server
+// reports every ASDU it passed to the Handler and how long the handler took.
+// Implementations must be safe for concurrent use and must not block.
+type HandlerMetrics interface {
+	// OnHandled is called after the handler returned, or panicked.
+	OnHandled(remote net.Addr, t asdu.TypeID, cause asdu.Cause, duration time.Duration)
+}

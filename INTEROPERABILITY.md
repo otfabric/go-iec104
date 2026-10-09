@@ -19,7 +19,7 @@ behaviour is the application's.
 | Port | 2404 by default, any |
 | TLS (IEC 62351-3) | yes, standard `crypto/tls`, default port 19998 |
 | IEC 62351-5 application-layer authentication | no |
-| Redundant connections (redundancy groups) | app; see [Redundancy](#redundancy) |
+| Redundant connections (redundancy groups) | client: yes (`client.Group`); server: app. See [Redundancy](#redundancy) |
 
 ## Application layer framing
 
@@ -201,14 +201,13 @@ redundancy group, of which exactly one is started.
   STARTDT/STOPDT state (`Session.Started`). `Server.Broadcast` sends to
   started sessions only. The library does not group sessions or enforce
   "one started connection per group"; it sends to every started one.
-- **Client**: one `Client` is one connection. For a standby connection use
-  `WithAutoStart(false)` and call `StartDT` on switchover.
+- **Client**: `client.Group` manages a redundancy group: every connection
+  established, exactly one started, the standbys supervised by test frames,
+  automatic failover when the active one is lost and manual `Switchover`.
+  A single `Client` with `WithAutoStart(false)` is the building block.
 
 ## Known deviations
 
-- A server confirms STOPDT immediately after acknowledging what it received;
-  it does not wait for its own outstanding I frames to be acknowledged
-  first. They remain supervised by `t1`.
 - The client's activation confirmation wait does not extend to the
   activation termination of a command; the termination reaches the `Handler`.
 - A received ASDU that cannot be decoded is dropped without a negative
@@ -216,7 +215,24 @@ redundancy group, of which exactly one is started.
 
 ## Verification status
 
-The library is tested against itself and against hand-written frames taken
-from the standard. It has **not yet** been run against third-party
-implementations or certified test equipment. Interoperability reports are
-welcome.
+Besides its own tests the library is run against two independent
+implementations, as client and as server, on every push. The reference
+builds are the images of
+[otfabric/iec104-interop v0.1.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.1.0),
+pinned by digest:
+
+| Reference | Version | go-iec104 client → reference server | reference client → go-iec104 server |
+|-----------|---------|-------------------------------------|-------------------------------------|
+| MZ Automation lib60870-C | v2.4.1 | pass | pass |
+| OpenMUC j60870 | 1.7.2 | pass | pass |
+
+The suite (`make interop`, package `interop`) covers the types of the
+reference fixture: `M_SP`, `M_DP`, `M_ST`, `M_BO`, `M_ME_NA/NB/NC`, `M_IT`
+and their CP56Time2a variants; `C_SC`, `C_DC`, `C_RC`, `C_SE_NA/NB/NC` with
+and without time tag; `C_IC`, `C_CI`, `C_RD`, `C_CS`, `C_TS_TA`; the negative
+answers; STARTDT/STOPDT; the `k`/`w` windows at 1; `t3` in both directions.
+The other type identifications are covered by this repository's codec tests
+only.
+
+It has **not** been run against certified test equipment or field devices.
+Interoperability reports are welcome.

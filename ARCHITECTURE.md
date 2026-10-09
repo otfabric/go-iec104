@@ -40,7 +40,8 @@ The packages follow the reuse boundaries rather than the picture:
 iec104 (root)      errors, State, Logger, Metrics
   ├── apci         frames, sequence arithmetic, Params          imports: nothing
   ├── asdu         ASDU model and codec                         imports: nothing
-  ├── internal/link  connection state machine                   imports: root, apci
+  ├── internal/link  connection state machine                   imports: root, apci, logx
+  ├── internal/logx  structured or formatted log entries        imports: root
   ├── client       controlling station                          imports: root, apci, asdu, link
   └── server       controlled station                           imports: root, apci, asdu, link
 ```
@@ -97,12 +98,13 @@ owns an established `net.Conn` and three goroutines:
 | I frame with unexpected N(S) | Close (`ErrProtocol`) |
 | N(R) acknowledging frames never sent | Close (`ErrProtocol`) |
 | I frame received while stopped | Close (`ErrProtocol`) |
-| I frame received between STOPDT act and con | Accepted, acknowledged with the con |
+| STOPDT act sent (client) | Received I frames are acknowledged first, and at once until the con arrives |
+| I frame received between STOPDT act and con | Accepted and acknowledged immediately |
 | `t1` expires on an I frame or a U activation | Close (`ErrTimeout`) |
 | `w` I frames received, or `t2` since the first | S frame |
 | Own I frame sent | Counts as the acknowledgement; no S frame |
 | `t3` without any received frame | TESTFR act, supervised by `t1` |
-| STOPDT act received (server) | Pending acknowledgement, then STOPDT con |
+| STOPDT act received (server) | Acknowledge what was received; STOPDT con once the peer has acknowledged every I frame sent to it (`t1` applies) |
 | STARTDT/STOPDT act received by a client | Ignored with a warning |
 | U confirmation nobody asked for | Ignored with a warning |
 
@@ -122,6 +124,16 @@ owns an established `net.Conn` and three goroutines:
 - **Delivery**: every ASDU goes to the `Handler`, whether an exchange took
   it or not. Request methods are a convenience on top of the stream, never a
   filter in front of it.
+- **Retries**: every request method runs through one function that bounds
+  each attempt, repeats only requests marked idempotent and only for
+  transport failures, and reports to metrics and log. Commands are not
+  marked, by design.
+
+`client.Group` composes several clients into a redundancy group. A supervisor
+goroutine, woken by the clients' state changes, keeps every connection
+established and exactly one started. It is the protocol's own notion of
+multiple connections; a pool of interchangeable connections would contradict
+how a station sends its data.
 
 ## Server
 
@@ -139,5 +151,6 @@ what is not registered.
 | `apci`, `asdu` | Byte vectors from the standard, round trips over every type identification, error tables, fuzzing (parse, re-encode, fixed point) |
 | `internal/link` | A scripted peer writing raw APDUs over loopback TCP: windows, each timer, each violation |
 | `client`, `server` | Against each other over loopback TCP, including TLS, reconnect and server restart |
+| `interop` | Against lib60870-C and OpenMUC j60870 in containers, as client and as server (`make interop`) |
 
 Everything runs with the race detector.

@@ -25,6 +25,7 @@ import (
 
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
+	"github.com/otfabric/go-iec104/internal/logx"
 )
 
 // Role is the station role of the local end of a connection.
@@ -58,8 +59,7 @@ const (
 type Config struct {
 	Role    Role
 	Params  apci.Params
-	Name    string         // log prefix
-	Logger  iec104.Logger  // nil disables logging
+	Log     *logx.Logger   // nil disables logging
 	Metrics iec104.Metrics // nil disables metrics
 
 	// OnASDU receives the payload of every I frame, in order.
@@ -144,6 +144,7 @@ type Link struct {
 	unacked     []time.Time // send times of the outstanding I frames
 	recvUnacked int
 	sentNR      uint16 // last N(R) sent to the peer
+	stopPending bool   // controlled station: STOPDT con is owed once the peer has acknowledged everything
 	throttled   bool   // softQueue reached: acknowledgements are withheld
 	t2At        time.Time
 	idleAt      time.Time
@@ -355,11 +356,11 @@ func (l *Link) shutdown(err error) {
 	close(l.done)
 	switch {
 	case errors.Is(err, iec104.ErrClosed):
-		l.debugf("closed")
+		l.cfg.Log.Debug("connection closed")
 	case errors.Is(err, iec104.ErrConnectionLost):
-		l.debugf("connection terminated: %v", err)
+		l.cfg.Log.Debug("connection terminated", "error", err)
 	default:
-		l.warnf("connection terminated: %v", err)
+		l.cfg.Log.Warn("connection terminated", "error", err)
 	}
 	l.push(event{kind: evClose, err: err})
 }
@@ -519,6 +520,14 @@ func (l *Link) onControl(r ctlReq) error {
 			// No further I frames once STOPDT act is on its way.
 			l.state = stopping
 			l.isStarted.Store(false)
+			// The controlled station confirms only when nothing it sent is
+			// left unacknowledged, so acknowledge now rather than at t2.
+			if l.recvUnacked > 0 {
+				if err := l.sendS(); err != nil {
+					r.done <- err
+					return err
+				}
+			}
 		}
 	case apci.TestFRAct:
 	default:
@@ -534,8 +543,8 @@ func (l *Link) onFrame(f apci.Frame) error {
 	if m := l.cfg.Metrics; m != nil {
 		m.OnFrameReceived(l.conn.RemoteAddr(), f, f.Len())
 	}
-	if l.cfg.Logger != nil {
-		l.debugf("<- %s", f)
+	if l.cfg.Log.DebugEnabled() {
+		l.cfg.Log.Debug("frame received", frameFields(f)...)
 	}
 
 	switch f.Format {
@@ -561,7 +570,9 @@ func (l *Link) onFrame(f apci.Frame) error {
 		l.t2At = now.Add(l.cfg.Params.T2)
 	}
 	l.push(event{kind: evASDU, data: f.ASDU})
-	if l.recvUnacked >= l.cfg.Params.W && !l.throttled {
+	// While a STOPDT is in progress the peer is waiting for this
+	// acknowledgement, so it is not delayed.
+	if (l.recvUnacked >= l.cfg.Params.W && !l.throttled) || l.state == stopping {
 		return l.sendS()
 	}
 	return nil
@@ -574,6 +585,19 @@ func (l *Link) acknowledge(nr uint16) error {
 	}
 	l.unacked = append(l.unacked[:0], l.unacked[n:]...)
 	l.ack = nr
+	if l.stopPending && len(l.unacked) == 0 {
+		return l.confirmStop()
+	}
+	return nil
+}
+
+// confirmStop sends the STOPDT con of a controlled station.
+func (l *Link) confirmStop() error {
+	l.stopPending = false
+	if err := l.write(apci.NewU(apci.StopDTCon)); err != nil {
+		return err
+	}
+	l.setState(stopped)
 	return nil
 }
 
@@ -587,27 +611,37 @@ func (l *Link) onU(fn apci.UFunction) error {
 
 	case apci.StartDTAct, apci.StopDTAct:
 		if l.cfg.Role != Controlled {
-			l.warnf("ignoring %s from controlled station", fn)
+			l.cfg.Log.Warn("ignoring U frame from controlled station", "function", fn.String())
 			return nil
 		}
-		if fn == apci.StopDTAct && l.recvUnacked > 0 {
+		if fn == apci.StartDTAct {
+			l.stopPending = false
+			if err := l.write(apci.NewU(apci.StartDTCon)); err != nil {
+				return err
+			}
+			l.setState(started)
+			return nil
+		}
+		if l.recvUnacked > 0 {
 			if err := l.sendS(); err != nil {
 				return err
 			}
 		}
-		if err := l.write(apci.NewU(fn.Confirmation())); err != nil {
-			return err
+		// STOPDT is confirmed once the peer has acknowledged every I frame
+		// sent to it (the "unconfirmed stopped" state of the standard).
+		// Until then nothing new is sent; t1 still supervises what is
+		// outstanding.
+		if len(l.unacked) > 0 {
+			l.state = stopping
+			l.isStarted.Store(false)
+			l.stopPending = true
+			return nil
 		}
-		if fn == apci.StartDTAct {
-			l.setState(started)
-		} else {
-			l.setState(stopped)
-		}
-		return nil
+		return l.confirmStop()
 
 	case apci.StartDTCon:
 		if _, ok := l.pending[apci.StartDTAct]; !ok {
-			l.warnf("ignoring unsolicited %s", fn)
+			l.cfg.Log.Warn("ignoring unsolicited confirmation", "function", fn.String())
 			return nil
 		}
 		l.setState(started)
@@ -616,7 +650,7 @@ func (l *Link) onU(fn apci.UFunction) error {
 
 	case apci.StopDTCon:
 		if _, ok := l.pending[apci.StopDTAct]; !ok {
-			l.warnf("ignoring unsolicited %s", fn)
+			l.cfg.Log.Warn("ignoring unsolicited confirmation", "function", fn.String())
 			return nil
 		}
 		if l.recvUnacked > 0 {
@@ -643,8 +677,8 @@ func (l *Link) write(f apci.Frame) error {
 	if m := l.cfg.Metrics; m != nil {
 		m.OnFrameSent(l.conn.RemoteAddr(), f, len(b))
 	}
-	if l.cfg.Logger != nil {
-		l.debugf("-> %s", f)
+	if l.cfg.Log.DebugEnabled() {
+		l.cfg.Log.Debug("frame sent", frameFields(f)...)
 	}
 	return nil
 }
@@ -713,14 +747,14 @@ func (l *Link) dispatch() {
 	}
 }
 
-func (l *Link) debugf(format string, args ...any) {
-	if l.cfg.Logger != nil {
-		l.cfg.Logger.Debugf(l.cfg.Name+": "+format, args...)
-	}
-}
-
-func (l *Link) warnf(format string, args ...any) {
-	if l.cfg.Logger != nil {
-		l.cfg.Logger.Warnf(l.cfg.Name+": "+format, args...)
+// frameFields describes an APDU for a log entry.
+func frameFields(f apci.Frame) []any {
+	switch f.Format {
+	case apci.FormatI:
+		return []any{"format", "I", "ns", f.SendSeq, "nr", f.RecvSeq, "len", len(f.ASDU)}
+	case apci.FormatS:
+		return []any{"format", "S", "nr", f.RecvSeq}
+	default:
+		return []any{"format", "U", "function", f.Function.String()}
 	}
 }

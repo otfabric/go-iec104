@@ -37,6 +37,9 @@ make fuzz
 
 # Build the examples into ./bin
 make build
+
+# Run the interop suite against lib60870 and OpenMUC j60870 (needs Docker)
+make interop
 ```
 
 Run `make` (or `make help`) for the full list of targets.
@@ -61,6 +64,7 @@ Run `make` (or `make help`) for the full list of targets.
 - A new type identification must appear in the round-trip test (`TestRoundTripAllTypes` fails for a registered type without coverage) and in [INTEROPERABILITY.md](INTEROPERABILITY.md)
 - Protocol machine behaviour is tested in `internal/link` with the scripted peer, where the exact frames are visible
 - Tests must pass with `-race` and must not depend on timing beyond generous upper bounds
+- A change to the protocol machine or to a type the reference fixture covers must keep `make interop` green (the Interop workflow runs it on every push). The `interop` package holds this repository's scenarios and assertions; the reference stacks themselves belong to [otfabric/iec104-interop](https://github.com/otfabric/iec104-interop) and are consumed as images only
 
 ### Documentation
 

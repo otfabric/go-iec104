@@ -1,0 +1,77 @@
+name: Interop
+run-name: "Interop (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ github.actor }}"
+
+# Runs go-iec104 against the reference implementations published by
+# otfabric/iec104-interop, as client and as server. The images are consumed as
+# published: nothing of iec104-interop is cloned or built here.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+    inputs:
+      lib60870_image:
+        description: "lib60870 reference image (default: the pinned release)"
+        required: false
+      openmuc_image:
+        description: "OpenMUC j60870 reference image (default: the pinned release)"
+        required: false
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # otfabric/iec104-interop v0.1.0: lib60870-C v2.4.1, OpenMUC j60870 1.7.2.
+  # Keep in step with the Makefile and interop/harness.go.
+  IEC104_INTEROP_LIB60870_IMAGE: ${{ inputs.lib60870_image || 'ghcr.io/otfabric/iec104-interop-lib60870@sha256:a1fbb44a16da39d5aa3f387456d1f2931811556e5a4298797a6b4ea64c4ef248' }}
+  IEC104_INTEROP_OPENMUC_IMAGE: ${{ inputs.openmuc_image || 'ghcr.io/otfabric/iec104-interop-openmuc@sha256:e1d15745d5e2005692f2844fb91c477826930b23fb772de14beb07da1942aa1a' }}
+
+jobs:
+  interop:
+    name: lib60870 + OpenMUC, client and server
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Pull reference images
+        run: |
+          docker pull "${IEC104_INTEROP_LIB60870_IMAGE}"
+          docker pull "${IEC104_INTEROP_OPENMUC_IMAGE}"
+          {
+            echo "| Reference | Image | Upstream |"
+            echo "|---|---|---|"
+            for image in "${IEC104_INTEROP_LIB60870_IMAGE}" "${IEC104_INTEROP_OPENMUC_IMAGE}"; do
+              docker run --rm "${image}" print-capabilities \
+                | jq -r --arg image "${image}" '"| \(.adapter) \(.adapterVersion) | `\($image)` | \(.upstream.name) \(.upstream.version) |"'
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the interop suite
+        run: make interop
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          docker ps -a > artifacts/docker-ps.txt || true
+          for c in $(docker ps -aq --filter name=go-iec104-interop); do
+            docker logs "$c" > "artifacts/${c}.log" 2>&1 || true
+          done
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs
+          path: artifacts/
+          if-no-files-found: ignore

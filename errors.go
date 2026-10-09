@@ -20,6 +20,12 @@ var (
 	// established connection.
 	ErrNotConnected = errors.New("iec104: not connected")
 
+	// ErrConnectFailed reports that a client could not establish its
+	// connection: the TCP dial or TLS handshake failed, or the controlled
+	// station did not confirm STARTDT. The underlying error is wrapped
+	// alongside it.
+	ErrConnectFailed = errors.New("iec104: connect failed")
+
 	// ErrNotStarted reports an attempt to send an ASDU while data transfer
 	// is stopped: before STARTDT or after STOPDT.
 	ErrNotStarted = errors.New("iec104: data transfer not started")
@@ -40,6 +46,11 @@ var (
 	// ErrBusy reports a request that cannot be issued because an identical
 	// one is still awaiting its confirmation.
 	ErrBusy = errors.New("iec104: request already pending")
+
+	// ErrInvalidOption reports an option value a client or server cannot be
+	// constructed with. Invalid protocol parameters are reported by the
+	// apci and asdu packages (apci.ErrInvalidParams, asdu.ErrInvalidParams).
+	ErrInvalidOption = errors.New("iec104: invalid option")
 )
 
 // NegativeError reports that the controlled station answered a request with

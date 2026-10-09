@@ -359,6 +359,9 @@ func TestUnknownTypeIsMirrored(t *testing.T) {
 	if err := c.Send(ctx, &asdu.ASDU{Type: asdu.M_SP_NA_1, Cause: 99}); !errors.Is(err, asdu.ErrInvalidValue) {
 		t.Errorf("unencodable ASDU: %v", err)
 	}
+	if err := c.Send(ctx, nil); !errors.Is(err, asdu.ErrInvalidValue) {
+		t.Errorf("nil ASDU: %v", err)
+	}
 }
 
 func TestPendingRequests(t *testing.T) {
@@ -519,8 +522,8 @@ func TestConnectErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Connect(ctx); err == nil {
-		t.Fatal("Connect to a closed port succeeded")
+	if err := c.Connect(ctx); !errors.Is(err, iec104.ErrConnectFailed) {
+		t.Fatalf("Connect to a closed port: %v, want ErrConnectFailed", err)
 	}
 	if c.State() != iec104.StateDisconnected || last == nil {
 		t.Errorf("state %s, handler error %v", c.State(), last)
@@ -544,8 +547,8 @@ func TestConnectErrors(t *testing.T) {
 	short, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	defer cancel()
 	c, _ = client.New(ln.Addr().String(), client.WithParams(testutil.Params()))
-	if err := c.Connect(short); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("Connect to a mute peer: %v, want deadline exceeded", err)
+	if err := c.Connect(short); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, iec104.ErrConnectFailed) {
+		t.Errorf("Connect to a mute peer: %v, want ErrConnectFailed wrapping deadline exceeded", err)
 	}
 	if c.State() != iec104.StateDisconnected {
 		t.Errorf("state after failed STARTDT: %s", c.State())
@@ -784,4 +787,61 @@ func TestCloseIsSynchronous(t *testing.T) {
 		t.Fatalf("%d sessions right after Session.Close", n)
 	}
 	_ = c
+}
+
+// A station that answers a read with a positive mirror before the data, and
+// data for other stations in between: neither is the answer.
+func TestReadSkipsWhatIsNotTheAnswer(t *testing.T) {
+	srv, err := server.New(server.HandlerFunc(func(s *server.Session, req *asdu.ASDU) {
+		ioa := req.First().Address()
+		_ = s.Reply(req, asdu.CauseActivationCon, false)
+		_ = s.Send(s.Context(), asdu.New(asdu.CauseRequest, req.CommonAddr+1, asdu.SinglePoint{IOA: ioa, Value: true}))
+		_ = s.Send(s.Context(), asdu.New(asdu.CauseRequest, req.CommonAddr, asdu.SinglePoint{IOA: ioa + 1, Value: true}))
+		_ = s.Send(s.Context(), asdu.New(asdu.CauseRequest, req.CommonAddr, asdu.SinglePoint{IOA: ioa, Value: true}))
+	}), server.WithParams(testutil.Params()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+
+	var handled int
+	var mu sync.Mutex
+	c := dial(t, ln.Addr().String(), client.WithHandler(client.HandlerFunc(func(*asdu.ASDU) {
+		mu.Lock()
+		handled++
+		mu.Unlock()
+	})))
+	a, err := c.Read(context.Background(), 5, 77)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if a.CommonAddr != 5 || a.First().Address() != 77 {
+		t.Errorf("Read returned %s, object %d", a, a.First().Address())
+	}
+	// Reading through the broadcast address accepts the answer of any station.
+	if a, err = c.Read(context.Background(), asdu.Broadcast, 78); err != nil {
+		t.Fatalf("Read (broadcast): %v", err)
+	}
+	if a.First().Address() != 78 {
+		t.Errorf("broadcast Read returned object %d", a.First().Address())
+	}
+	testutil.Eventually(t, "handler deliveries", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return handled == 8
+	})
+}
+
+func TestReconnectDefaults(t *testing.T) {
+	// Zero and inverted delays are replaced by usable ones; the client must
+	// construct and not spin.
+	for _, r := range []client.Reconnect{{}, {MinDelay: time.Minute, MaxDelay: time.Second}, {MinDelay: -1}} {
+		c, err := client.New("192.0.2.1", client.WithReconnect(r), client.WithRequestTimeout(0))
+		if err != nil {
+			t.Fatalf("New with %+v: %v", r, err)
+		}
+		_ = c.Close()
+	}
 }

@@ -10,6 +10,7 @@ How go-iec104 reports failures. For signatures see [API.md](API.md).
 - [Connection-fatal errors](#connection-fatal-errors)
 - [Codec errors](#codec-errors)
 - [Context and timeouts](#context-and-timeouts)
+- [Retries](#retries)
 - [What is not an error](#what-is-not-an-error)
 - [Detection patterns](#detection-patterns)
 
@@ -20,6 +21,7 @@ How go-iec104 reports failures. For signatures see [API.md](API.md).
 | Station answers with P/N = 1 or cause 44..47 | `*iec104.NegativeError` | stays up |
 | Answer does not arrive before the deadline | wraps `context.DeadlineExceeded` | stays up |
 | Request while the same one is pending | `iec104.ErrBusy` | stays up |
+| `Connect`/`Dial` could not establish the connection | `iec104.ErrConnectFailed`, wrapping the cause | - |
 | Client has no connection | `iec104.ErrNotConnected` | - |
 | Data transfer stopped (before STARTDT, after STOPDT) | `iec104.ErrNotStarted` | stays up |
 | Operation after `Close` | `iec104.ErrClosed` | - |
@@ -28,6 +30,7 @@ How go-iec104 reports failures. For signatures see [API.md](API.md).
 | Malformed APDU, sequence error, I frame in STOPDT | `iec104.ErrProtocol` | closed |
 | ASDU cannot be encoded | `asdu.Err…` | stays up |
 | Invalid `apci.Params` / `asdu.Params` at construction | `apci.ErrInvalidParams` / `asdu.ErrInvalidParams` | - |
+| Any other invalid option at construction | `iec104.ErrInvalidOption` | - |
 
 All sentinels are wrapped with detail. Always test with `errors.Is` and
 `errors.As`, never with `==`.
@@ -40,11 +43,13 @@ Defined in the root package and shared by client and server:
 |----------|---------|
 | `ErrClosed` | The client, server or session was closed by the application |
 | `ErrNotConnected` | The client has no established connection (never connected, or reconnecting) |
+| `ErrConnectFailed` | `Connect` or `Dial` failed: TCP dial, TLS handshake or STARTDT. The cause is wrapped too, so `errors.Is(err, context.DeadlineExceeded)` and `errors.As(err, &netErr)` keep working |
 | `ErrNotStarted` | An ASDU was to be sent while data transfer is stopped |
 | `ErrConnectionLost` | The peer closed the connection or the transport failed |
 | `ErrTimeout` | `t1` expired; the connection was closed |
 | `ErrProtocol` | The peer violated the protocol; the connection was closed |
 | `ErrBusy` | An identical request, or a conflicting STARTDT/STOPDT, is in progress |
+| `ErrInvalidOption` | An option value a client or server cannot be constructed with |
 
 `server.ErrServerClosed` is what `Serve` and `ListenAndServe` return after
 `Server.Close`. It is the normal way for them to end.
@@ -93,7 +98,7 @@ Returned by `asdu.Encode`/`Decode` and by every method that encodes an ASDU
 
 | Sentinel | Meaning |
 |----------|---------|
-| `asdu.ErrInvalidValue` | A field does not fit: qualifier out of range, address wider than the field, more than 127 objects |
+| `asdu.ErrInvalidValue` | A field does not fit: qualifier out of range, address wider than the field, more than 127 objects; also a nil ASDU or command |
 | `asdu.ErrTypeMismatch` | An object does not belong to the ASDU's type, or is not a command where one is required |
 | `asdu.ErrUnsupportedType` | Typed objects under a type identification without an object model |
 | `asdu.ErrNotSequential` | `Sequence` is set and the addresses are not consecutive |
@@ -110,6 +115,8 @@ An encode error never touches the connection: nothing was sent.
 ## Context and timeouts
 
 - **Connect** is bounded by the context and by `t0`, whichever ends first.
+  Its error always matches `ErrConnectFailed` and, when a deadline was the
+  reason, `context.DeadlineExceeded` as well.
 - **Request methods** (`Command`, `Interrogate`, `Read`, …) wait for the
   station's answer. A context without deadline is bounded by
   `WithRequestTimeout` (default 10s); a context with a deadline is used as
@@ -122,6 +129,36 @@ An encode error never touches the connection: nothing was sent.
 - **StartDT/StopDT/TestLink** wait for the confirmation. If the context ends
   first the call returns, but the U frame stays outstanding and `t1` still
   applies to it.
+
+## Retries
+
+Off by default. `client.WithRetry` repeats a request when all of these hold:
+
+1. **The request only reads**: `Interrogate`, `CounterInterrogate` with
+   `asdu.FreezeRead`, `Read`, `TestCommand`.
+2. **The failure is transient**: the connection is not there
+   (`ErrNotConnected`, `ErrNotStarted`), was lost during the attempt
+   (`ErrConnectionLost`, `ErrTimeout`, `ErrProtocol`), or the station did not
+   answer within the request timeout.
+3. **The caller still wants it**: its context has not ended and the client is
+   not closed.
+
+A `*NegativeError` is never retried: the station answered. `ErrBusy` is not
+retried either.
+
+`Command`, `Deactivate`, `ClockSync`, `ResetProcess`, a counter freeze or
+reset and `Send` are **never** repeated. If the confirmation of a command is
+lost, the command may have been executed; IEC 60870-5-104 offers no way to
+find out, and sending it again could operate the process twice. Decide in the
+application, typically by reading the state back.
+
+With retries on, the request timeout applies to every attempt even when the
+context has a deadline; the context bounds the call as a whole. After the
+last attempt the error of that attempt is returned. Retries are reported
+through `RequestMetrics.OnRetry` and a warning in the log.
+
+A `Group` answers `ErrNotConnected` while it has no started connection;
+`ErrInvalidOption` when created without addresses.
 
 ## What is not an error
 

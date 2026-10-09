@@ -3,10 +3,13 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
+	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -436,8 +439,8 @@ func TestServerLifecycle(t *testing.T) {
 	if _, err := server.New(nil, server.WithASDUParams(asdu.Params{})); !errors.Is(err, asdu.ErrInvalidParams) {
 		t.Errorf("invalid ASDU params: %v", err)
 	}
-	if _, err := server.New(nil, server.WithMaxSessions(-1)); err == nil {
-		t.Error("negative session limit accepted")
+	if _, err := server.New(nil, server.WithMaxSessions(-1)); !errors.Is(err, iec104.ErrInvalidOption) {
+		t.Errorf("negative session limit: %v, want ErrInvalidOption", err)
 	}
 
 	srv, err := server.New(server.HandlerFunc(confirmAll), server.WithParams(testutil.Params()))
@@ -621,4 +624,79 @@ func TestBurstWithSlowHandler(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+type handled struct {
+	iec104.NopMetrics
+	mu    sync.Mutex
+	types []asdu.TypeID
+	bad   bool
+}
+
+func (h *handled) OnHandled(remote net.Addr, t asdu.TypeID, cause asdu.Cause, d time.Duration) {
+	h.mu.Lock()
+	h.types = append(h.types, t)
+	if remote == nil || cause != asdu.CauseActivation || d < 20*time.Millisecond {
+		h.bad = true
+	}
+	h.mu.Unlock()
+}
+
+func TestHandlerMetricsAndStructuredLog(t *testing.T) {
+	m := &handled{}
+	var buf bytes.Buffer
+	var bufMu sync.Mutex
+	logger := iec104.NewSlogFieldLogger(slog.NewJSONHandler(lockedWriter{&bufMu, &buf}, nil)).With("site", "north")
+	_, addr := serve(t, server.HandlerFunc(func(s *server.Session, req *asdu.ASDU) {
+		time.Sleep(25 * time.Millisecond)
+		if req.First().Address() == 666 {
+			panic("boom")
+		}
+		_ = s.Confirm(req)
+	}), server.WithMetrics(m), server.WithLogger(logger))
+	c := connect(t, addr)
+	if err := c.TestCommand(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	// A handler that panics is measured as well.
+	_ = c.Command(context.Background(), 1, asdu.SingleCommand{IOA: 666})
+
+	testutil.Eventually(t, "handler metrics", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.types) == 2
+	})
+	m.mu.Lock()
+	if m.types[0] != asdu.C_TS_TA_1 || m.types[1] != asdu.C_SC_NA_1 || m.bad {
+		t.Errorf("handler metrics: %v, bad=%v", m.types, m.bad)
+	}
+	m.mu.Unlock()
+
+	testutil.Eventually(t, "panic logged", func() bool {
+		bufMu.Lock()
+		defer bufMu.Unlock()
+		return strings.Contains(buf.String(), `"msg":"handler panic"`)
+	})
+	bufMu.Lock()
+	out := buf.String()
+	bufMu.Unlock()
+	for _, want := range []string{
+		`"msg":"listening"`, `"component":"iec104.server"`, `"site":"north"`,
+		`"msg":"session connected"`, `"session":1`, `"panic":"boom"`, `"level":"ERROR"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("server log misses %s:\n%s", want, out)
+		}
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

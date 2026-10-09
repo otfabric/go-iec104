@@ -16,6 +16,7 @@ import (
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
+	"github.com/otfabric/go-iec104/internal/logx"
 )
 
 // ErrServerClosed is returned by [Server.Serve] and
@@ -45,6 +46,7 @@ func (f HandlerFunc) HandleASDU(s *Session, a *asdu.ASDU) { f(s, a) }
 type Server struct {
 	handler Handler
 	opts    options
+	log     *logx.Logger
 	nextID  atomic.Uint64
 
 	mu        sync.Mutex
@@ -68,7 +70,7 @@ func New(h Handler, opts ...Option) (*Server, error) {
 		return nil, err
 	}
 	if o.maxSessions < 0 {
-		return nil, fmt.Errorf("iec104: max sessions %d, want >= 0", o.maxSessions)
+		return nil, fmt.Errorf("%w: max sessions %d, want >= 0", iec104.ErrInvalidOption, o.maxSessions)
 	}
 	if h == nil {
 		h = NewMux()
@@ -76,6 +78,7 @@ func New(h Handler, opts ...Option) (*Server, error) {
 	return &Server{
 		handler:   h,
 		opts:      o,
+		log:       logx.New(o.logger, "server"),
 		listeners: make(map[net.Listener]struct{}),
 		sessions:  make(map[*Session]struct{}),
 		pending:   make(map[net.Conn]struct{}),
@@ -124,7 +127,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		_ = ln.Close()
 	}()
 
-	s.infof("listening on %s", ln.Addr())
+	s.log.Info("listening", "address", ln.Addr().String())
 	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -136,7 +139,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			if errors.As(err, &ne) && ne.Timeout() {
 				// A transient accept failure: back off and retry.
 				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
-				s.warnf("accept: %v; retrying in %s", err, delay)
+				s.log.Warn("accept failed", "retry_in", delay.String(), "error", err)
 				time.Sleep(delay)
 				continue
 			}
@@ -150,12 +153,12 @@ func (s *Server) Serve(ln net.Listener) error {
 func (s *Server) accept(conn net.Conn) {
 	remote := conn.RemoteAddr()
 	if f := s.opts.accept; f != nil && !f(remote) {
-		s.warnf("rejected connection from %s: not accepted", remote)
+		s.log.Warn("connection rejected", "remote", remote.String(), "reason", "not accepted")
 		_ = conn.Close()
 		return
 	}
 	if err := s.handshake(conn); err != nil {
-		s.warnf("rejected connection from %s: %v", remote, err)
+		s.log.Warn("connection rejected", "remote", remote.String(), "error", err)
 		_ = conn.Close()
 		return
 	}
@@ -167,7 +170,8 @@ func (s *Server) accept(conn net.Conn) {
 		return
 	case s.opts.maxSessions > 0 && len(s.sessions) >= s.opts.maxSessions:
 		s.mu.Unlock()
-		s.warnf("rejected connection from %s: session limit %d reached", remote, s.opts.maxSessions)
+		s.log.Warn("connection rejected", "remote", remote.String(), "reason", "session limit reached",
+			"limit", s.opts.maxSessions)
 		_ = conn.Close()
 		return
 	}
@@ -304,16 +308,4 @@ func (s *Server) Close() error {
 		_ = sess.Close()
 	}
 	return err
-}
-
-func (s *Server) infof(format string, args ...any) {
-	if s.opts.logger != nil {
-		s.opts.logger.Infof("iec104 server: "+format, args...)
-	}
-}
-
-func (s *Server) warnf(format string, args ...any) {
-	if s.opts.logger != nil {
-		s.opts.logger.Warnf("iec104 server: "+format, args...)
-	}
 }

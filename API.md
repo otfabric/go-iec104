@@ -24,11 +24,13 @@ What client and server share.
 var (
 	ErrClosed         // closed by the application
 	ErrNotConnected   // client has no connection
+	ErrConnectFailed  // Connect/Dial failed; wraps the cause
 	ErrNotStarted     // data transfer stopped
 	ErrConnectionLost // peer closed or transport failed
 	ErrTimeout        // t1 expired; connection closed
 	ErrProtocol       // peer violated the protocol; connection closed
 	ErrBusy           // identical request or conflicting procedure pending
+	ErrInvalidOption  // option value a client or server cannot be built with
 )
 
 type NegativeError struct{ ASDU *asdu.ASDU }
@@ -72,6 +74,34 @@ type Metrics interface {
 	OnDecodeError(remote net.Addr, err error)
 }
 type NopMetrics struct{} // embed to implement a subset
+
+// Optional extensions, detected on the value given to WithMetrics.
+type RequestMetrics interface { // client
+	OnRequest(remote net.Addr, t asdu.TypeID, ca asdu.CommonAddr)
+	OnRequestDone(remote net.Addr, t asdu.TypeID, ca asdu.CommonAddr, duration time.Duration, err error)
+	OnRetry(remote net.Addr, t asdu.TypeID, ca asdu.CommonAddr, attempt int, err error)
+}
+type HandlerMetrics interface { // server
+	OnHandled(remote net.Addr, t asdu.TypeID, cause asdu.Cause, duration time.Duration)
+}
+
+// Optional extensions of Logger; NewSlogLogger returns both.
+type FieldLogger interface {
+	Logger
+	With(keysAndValues ...any) FieldLogger
+	DebugKV(msg string, keysAndValues ...any)
+	InfoKV(msg string, keysAndValues ...any)
+	WarnKV(msg string, keysAndValues ...any)
+	ErrorKV(msg string, keysAndValues ...any)
+}
+type ContextLogger interface {
+	Logger
+	DebugContext(ctx context.Context, msg string, keysAndValues ...any)
+	InfoContext(ctx context.Context, msg string, keysAndValues ...any)
+	WarnContext(ctx context.Context, msg string, keysAndValues ...any)
+	ErrorContext(ctx context.Context, msg string, keysAndValues ...any)
+}
+func NewSlogFieldLogger(h slog.Handler) FieldLogger
 ```
 
 See [OBSERVABILITY.md](OBSERVABILITY.md).
@@ -96,7 +126,8 @@ func (c *Client) Addr() string
 
 - `addr` is `host:port`; a missing port becomes 2404, or 19998 with `WithTLS`.
 - `Connect` dials (bounded by `ctx` and `t0`) and, unless `WithAutoStart(false)`,
-  sends STARTDT. It returns `ErrBusy` when already connected or connecting.
+  sends STARTDT. It returns `ErrBusy` when already connected or connecting and
+  `ErrConnectFailed`, wrapping the cause, when the connection cannot be made.
 - `Dial` is `New` + `Connect`.
 - `Close` is idempotent, stops reconnecting and fails pending requests with
   `ErrClosed`. A closed client cannot be reused.
@@ -112,7 +143,10 @@ func (c *Client) Addr() string
 | `WithStateHandler(func(iec104.State, error))` | none | Connection state changes, with the reason |
 | `WithAutoStart(bool)` | true | Send STARTDT on connect and reconnect |
 | `WithReconnect(Reconnect)` | off | Re-dial after a loss; `MinDelay` 1s, `MaxDelay` 30s, exponential |
-| `WithRequestTimeout(time.Duration)` | 10s | Bound for request methods when the context has no deadline; ≤ 0 disables |
+| `WithRetry(Retry)` | off | Repeat idempotent requests on transient failure; `Attempts` 3, `Backoff` 500ms doubling up to `MaxBackoff` 10s |
+| `WithStartHandler(func(context.Context, *Client))` | none | Runs on its own goroutine after every connect and reconnect that started data transfer |
+| `WithSwitchHandler(func(*Client))` | none | `Group` only: the active connection changed |
+| `WithRequestTimeout(time.Duration)` | 10s | Bound for request methods when the context has no deadline, and for every attempt with `WithRetry`; ≤ 0 disables |
 | `WithTLS(*tls.Config)` | none | TLS on top of the dialled connection |
 | `WithDialer(Dialer)` | `net.Dialer` | Custom transport |
 | `WithLogger(iec104.Logger)` | silent | Logging |
@@ -127,6 +161,12 @@ type Dialer interface {
 }
 
 type Reconnect struct{ MinDelay, MaxDelay time.Duration }
+
+type Retry struct {
+	Attempts   int           // total attempts, default 3
+	Backoff    time.Duration // before the second attempt, doubling; default 500ms
+	MaxBackoff time.Duration // default 10s
+}
 ```
 
 ### Link control
@@ -171,6 +211,21 @@ func (c *Client) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier
 - Two requests with the same type, common address and object address cannot
   be pending at once (`ErrBusy`): their answers would be indistinguishable.
 
+### Retries
+
+With `WithRetry` a request that only reads is repeated when it failed for a
+transient reason:
+
+| | |
+|---|---|
+| Retried | `Interrogate`, `CounterInterrogate` with `asdu.FreezeRead`, `Read`, `TestCommand` |
+| Never retried | `Command`, `Deactivate`, `ClockSync`, `ResetProcess`, `CounterInterrogate` with a freeze or reset, `Send` |
+| Repeated on | `ErrNotConnected`, `ErrNotStarted`, `ErrConnectionLost`, `ErrTimeout`, `ErrProtocol`, an attempt that ran into the request timeout |
+| Not repeated on | `*NegativeError`, `ErrBusy`, `ErrClosed`, encode errors, the caller's context ending |
+
+Each attempt is bounded by the request timeout, the whole call by the
+caller's context. See [ERRORS.md](ERRORS.md#retries).
+
 ### Raw send
 
 ```go
@@ -180,6 +235,43 @@ func (c *Client) Send(ctx context.Context, a *asdu.ASDU) error
 Transmits one ASDU and does not wait for an answer. Blocks while the send
 window is full. For parameters, file transfer, private types and anything
 the request methods do not cover.
+
+### Redundancy group
+
+```go
+func NewGroup(addrs []string, opts ...Option) (*Group, error)
+
+func (g *Group) Connect(ctx context.Context) error
+func (g *Group) Close() error
+func (g *Group) Active() *Client   // nil when no connection is started
+func (g *Group) Clients() []*Client
+func (g *Group) Switchover(ctx context.Context) error
+
+// On the active connection; ErrNotConnected when there is none:
+func (g *Group) Interrogate(...)        func (g *Group) CounterInterrogate(...)
+func (g *Group) Read(...)               func (g *Group) ClockSync(...)
+func (g *Group) Command(...)            func (g *Group) Deactivate(...)
+func (g *Group) TestCommand(...)        func (g *Group) ResetProcess(...)
+func (g *Group) Send(...)
+```
+
+A `Group` is IEC 60870-5-104's alternative to a connection pool: several
+connections to one station, exactly one with data transfer started, the
+others established in STOPDT and supervised by test frames.
+
+- `Connect` returns when one connection is started; the others, and any
+  connection lost later, are (re-)established in the background.
+- Data transfer starts on the first connection that becomes established.
+  When the active one is lost, another established one is started and
+  `WithSwitchHandler` is called.
+- A path that returns becomes a standby. `Switchover` moves data transfer to
+  the next standby (STOPDT on one, STARTDT on the other) and fails with
+  `ErrNotConnected`, leaving the active connection alone, when there is none.
+- Options apply to every connection. The group controls `WithAutoStart` and
+  always reconnects. `WithStartHandler` is not used by a group; use
+  `WithSwitchHandler`.
+- A select and its execute must use the same connection: select again after
+  a switchover.
 
 ## Package `server`
 
@@ -301,7 +393,8 @@ func TypeOf(obj InformationObject) TypeID
 - `New` takes the type from the first object via `TypeOf`: the variant
   without time tag when `Time` is zero, the CP56Time2a variant otherwise.
 - `Decode` copies; the result does not alias the input.
-- A failed `AppendEncode` returns the buffer unchanged.
+- A failed `AppendEncode` returns the buffer unchanged. Encoding a nil
+  `*ASDU` is an error (`ErrInvalidValue`), not a panic.
 
 ### Params
 
@@ -506,5 +599,8 @@ Errors: `ErrInvalidStart`, `ErrInvalidLength`, `ErrInvalidControl`,
   running.
 - State handlers run on the protocol path and must not block. The client's
   may call `State` and nothing else on the client.
+- A start handler (`WithStartHandler`) runs on its own goroutine and may call
+  any method. A switch handler (`WithSwitchHandler`) runs on the group's
+  supervisor and must not block.
 - `asdu.ASDU` values passed to handlers are owned by the receiver; values
   passed to `Send` are not retained.

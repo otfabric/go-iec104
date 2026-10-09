@@ -12,6 +12,7 @@ import (
 
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
+	"github.com/otfabric/go-iec104/internal/logx"
 )
 
 // peer is a scripted remote station speaking raw APDUs.
@@ -115,8 +116,7 @@ func setup(t *testing.T, role Role, params apci.Params, mutate ...func(*recorder
 	l := New(local, Config{
 		Role:   role,
 		Params: params,
-		Name:   "test",
-		Logger: iec104.NopLogger(),
+		Log:    logx.New(iec104.NopLogger(), "test"),
 		OnASDU: func(raw []byte) {
 			if rec.gate != nil {
 				<-rec.gate
@@ -213,9 +213,9 @@ func TestStartSendStop(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() { errc <- l.StopDT(ctx) }()
+	p.expectS(3) // what was received is acknowledged before STOPDT act
 	p.expectU(apci.StopDTAct)
 	p.send(apci.NewU(apci.StopDTCon))
-	p.expectS(3) // the outstanding I frame is acknowledged on STOPDT con
 	if err := <-errc; err != nil {
 		t.Fatalf("StopDT: %v", err)
 	}
@@ -469,13 +469,89 @@ func TestStartStopInterlock(t *testing.T) {
 	if err := l.StartDT(ctx); !errors.Is(err, iec104.ErrBusy) {
 		t.Fatalf("StartDT during STOPDT: %v, want ErrBusy", err)
 	}
-	// I frames still in flight are accepted until STOPDT con.
+	// I frames still in flight are accepted until STOPDT con, and
+	// acknowledged at once: the peer waits for that before it confirms.
 	p.send(apci.NewI(0, 0, []byte{1}))
+	p.expectS(1)
 	p.send(apci.NewU(apci.StopDTCon))
 	if err := <-stopc; err != nil {
 		t.Fatal(err)
 	}
-	p.expectS(1)
+}
+
+// A controlled station confirms STOPDT only after the controlling station
+// has acknowledged every I frame it was sent.
+func TestStopDTWaitsForAcknowledgement(t *testing.T) {
+	l, p, rec := setup(t, Controlled, fastParams())
+	ctx := context.Background()
+	p.send(apci.NewU(apci.StartDTAct))
+	p.expectU(apci.StartDTCon)
+	eventually(t, "started", l.Started)
+	for i := 0; i < 3; i++ {
+		if err := l.Send(ctx, []byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+		p.expectI(uint16(i), 0)
+	}
+
+	p.send(apci.NewU(apci.StopDTAct))
+	eventually(t, "sending stopped", func() bool { return !l.Started() })
+	if err := l.Send(ctx, []byte{9}); !errors.Is(err, iec104.ErrNotStarted) {
+		t.Fatalf("Send while STOPDT is pending: %v", err)
+	}
+	// A partial acknowledgement is not enough.
+	p.send(apci.NewS(2))
+	_ = p.conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if f, err := apci.ReadFrame(p.conn); err == nil {
+		t.Fatalf("peer got %s before it acknowledged everything", f)
+	}
+	rec.mu.Lock()
+	states := len(rec.states)
+	rec.mu.Unlock()
+	if states != 1 {
+		t.Fatalf("%d state changes reported, want only the start", states)
+	}
+	p.send(apci.NewS(3))
+	p.expectU(apci.StopDTCon)
+	eventually(t, "stop reported", func() bool {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return len(rec.states) == 2 && !rec.states[1]
+	})
+
+	// STARTDT while a STOPDT is pending cancels it.
+	p.send(apci.NewU(apci.StartDTAct))
+	p.expectU(apci.StartDTCon)
+	eventually(t, "started again", l.Started)
+	if err := l.Send(ctx, []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	p.expectI(3, 0)
+	p.send(apci.NewU(apci.StopDTAct))
+	p.send(apci.NewU(apci.StartDTAct))
+	p.expectU(apci.StartDTCon)
+	p.send(apci.NewS(4))
+	p.send(apci.NewU(apci.TestFRAct))
+	p.expectU(apci.TestFRCon) // no STOPDT con in between
+	if !l.Started() {
+		t.Fatal("STARTDT did not cancel the pending STOPDT")
+	}
+}
+
+// Without the acknowledgement the pending STOPDT ends in t1.
+func TestStopDTPendingTimesOut(t *testing.T) {
+	params := fastParams()
+	params.T1, params.T2 = 300*time.Millisecond, 100*time.Millisecond
+	l, p, rec := setup(t, Controlled, params)
+	p.send(apci.NewU(apci.StartDTAct))
+	p.expectU(apci.StartDTCon)
+	eventually(t, "started", l.Started)
+	if err := l.Send(context.Background(), []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	p.expectI(0, 0)
+	p.send(apci.NewU(apci.StopDTAct))
+	waitClosed(t, l, rec, iec104.ErrTimeout)
 }
 
 // A callback that stalls must not grow the receive queue without bound.
@@ -581,4 +657,53 @@ func TestThrottledLinkStillProcessesAcks(t *testing.T) {
 	}
 	close(gate)
 	eventually(t, "all ASDUs", func() bool { return rec.count() == softQueue+10 })
+}
+
+// Writes that fail end the link and are reported to the caller that
+// triggered them.
+func TestWriteFailures(t *testing.T) {
+	t.Run("send", func(t *testing.T) {
+		l, p, rec := setup(t, Controlling, fastParams())
+		start(t, l, p)
+		_ = l.conn.(*net.TCPConn).CloseWrite()
+		if err := l.Send(context.Background(), []byte{1}); !errors.Is(err, iec104.ErrConnectionLost) {
+			t.Fatalf("Send on a connection closed for writing: %v", err)
+		}
+		waitClosed(t, l, rec, iec104.ErrConnectionLost)
+	})
+	t.Run("control", func(t *testing.T) {
+		l, _, rec := setup(t, Controlling, fastParams())
+		_ = l.conn.(*net.TCPConn).CloseWrite()
+		if err := l.StartDT(context.Background()); !errors.Is(err, iec104.ErrConnectionLost) {
+			t.Fatalf("StartDT on a connection closed for writing: %v", err)
+		}
+		waitClosed(t, l, rec, iec104.ErrConnectionLost)
+	})
+	t.Run("oversized", func(t *testing.T) {
+		l, p, _ := setup(t, Controlling, fastParams())
+		start(t, l, p)
+		if err := l.Send(context.Background(), make([]byte, apci.MaxASDULength+1)); !errors.Is(err, apci.ErrASDUTooLong) {
+			t.Fatalf("oversized ASDU: %v", err)
+		}
+	})
+}
+
+// A context that ends while a request waits for the loop is honoured.
+func TestCancelledContexts(t *testing.T) {
+	params := fastParams()
+	params.K, params.W = 1, 1
+	l, p, _ := setup(t, Controlling, params)
+	start(t, l, p)
+	if err := l.Send(context.Background(), []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := l.Send(done, []byte{2}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send with a full window and a cancelled context: %v", err)
+	}
+	// An invalid control function never reaches the wire.
+	if err := l.control(context.Background(), apci.StartDTCon); !errors.Is(err, apci.ErrInvalidControl) {
+		t.Fatalf("control with a confirmation: %v", err)
+	}
 }

@@ -39,9 +39,7 @@ func (c *Client) reconnectLoop() {
 		}
 		// Still connecting: report the failed attempt.
 		c.setState(iec104.StateConnecting, err)
-		if c.opts.logger != nil {
-			c.opts.logger.Warnf("iec104 client %s: reconnect failed, retrying in %s: %v", c.addr, delay, err)
-		}
+		c.log.Warn("reconnect failed", "retry_in", delay.String(), "error", err)
 		delay = min(delay*2, c.opts.reconnect.MaxDelay)
 		timer.Reset(delay)
 	}

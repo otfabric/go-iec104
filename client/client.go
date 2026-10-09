@@ -15,6 +15,7 @@ import (
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/internal/link"
+	"github.com/otfabric/go-iec104/internal/logx"
 )
 
 // Client is the controlling station end of one IEC 60870-5-104 connection.
@@ -22,9 +23,11 @@ import (
 type Client struct {
 	addr string
 	opts options
+	log  *logx.Logger
 
 	mu        sync.Mutex
 	link      *link.Link
+	remote    net.Addr // of the current or the last connection
 	state     iec104.State
 	closed    bool
 	dialing   bool // a connect attempt owns the connection state
@@ -57,7 +60,12 @@ func New(addr string, opts ...Option) (*Client, error) {
 		}
 		addr = net.JoinHostPort(addr, strconv.Itoa(port))
 	}
-	return &Client{addr: addr, opts: o, closeCh: make(chan struct{})}, nil
+	return &Client{
+		addr:    addr,
+		opts:    o,
+		log:     logx.New(o.logger, "client", "remote", addr),
+		closeCh: make(chan struct{}),
+	}, nil
 }
 
 // Dial creates a client and connects it. It is shorthand for [New] followed
@@ -134,7 +142,7 @@ func (c *Client) connect(ctx context.Context) error {
 		if c.isClosed() {
 			return iec104.ErrClosed
 		}
-		return fmt.Errorf("iec104: connect %s: %w", c.addr, err)
+		return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, c.addr, err)
 	}
 	remote := conn.RemoteAddr()
 	if m := c.opts.metrics; m != nil {
@@ -146,8 +154,7 @@ func (c *Client) connect(ctx context.Context) error {
 	l = link.New(conn, link.Config{
 		Role:    link.Controlling,
 		Params:  c.opts.params,
-		Name:    "iec104 client " + c.addr,
-		Logger:  c.opts.logger,
+		Log:     c.log,
 		Metrics: c.opts.metrics,
 		OnASDU:  func(raw []byte) { c.onASDU(remote, raw) },
 		OnState: func(bool) {
@@ -168,6 +175,7 @@ func (c *Client) connect(ctx context.Context) error {
 		return iec104.ErrClosed
 	}
 	c.link = l
+	c.remote = remote
 	c.mu.Unlock()
 	close(ready)
 	c.syncState(l)
@@ -176,7 +184,7 @@ func (c *Client) connect(ctx context.Context) error {
 		if err := l.StartDT(ctx); err != nil {
 			c.detach(l)
 			_ = l.Close()
-			return fmt.Errorf("iec104: STARTDT %s: %w", c.addr, err)
+			return fmt.Errorf("%w: STARTDT %s: %w", iec104.ErrConnectFailed, c.addr, err)
 		}
 	}
 
@@ -187,9 +195,24 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	if !alive {
-		return fmt.Errorf("iec104: connect %s: %w", c.addr, l.Err())
+		return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, c.addr, l.Err())
 	}
 	c.syncState(l)
+	if f := c.opts.onStart; f != nil && l.Started() {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			defer cancel()
+			f(ctx, c)
+		}()
+		go func() {
+			select {
+			case <-l.Done():
+			case <-c.closeCh:
+			case <-ctx.Done():
+			}
+			cancel()
+		}()
+	}
 	return nil
 }
 
@@ -335,12 +358,22 @@ func (c *Client) current() (*link.Link, error) {
 	return c.link, nil
 }
 
-// bound applies the request timeout to a context without deadline.
+// bound applies the request timeout: to a context without deadline, or to
+// every attempt when retries are enabled.
 func (c *Client) bound(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok || c.opts.requestTimout <= 0 {
+	if c.opts.requestTimeout <= 0 {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.opts.requestTimout)
+	if _, ok := ctx.Deadline(); ok && c.opts.retry == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, c.opts.requestTimeout)
+}
+
+func (c *Client) remoteAddr() net.Addr {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.remote
 }
 
 // setState records a state change and notifies the state handler.
@@ -384,15 +417,16 @@ func (c *Client) syncState(l *link.Link) {
 
 // emit logs and reports a state change. The caller holds notifyMu.
 func (c *Client) emit(s iec104.State, err error) {
-	if c.opts.logger != nil {
-		if err != nil {
-			c.opts.logger.Infof("iec104 client %s: %s: %v", c.addr, s, err)
-		} else {
-			c.opts.logger.Infof("iec104 client %s: %s", c.addr, s)
-		}
+	if err != nil {
+		c.log.Info("connection state", "state", s.String(), "error", err)
+	} else {
+		c.log.Info("connection state", "state", s.String())
 	}
 	if f := c.opts.onState; f != nil {
 		f(s, err)
+	}
+	if f := c.opts.stateTap; f != nil {
+		f()
 	}
 }
 
@@ -445,9 +479,7 @@ func (c *Client) onASDU(remote net.Addr, raw []byte) {
 		if m := c.opts.metrics; m != nil {
 			m.OnDecodeError(remote, err)
 		}
-		if c.opts.logger != nil {
-			c.opts.logger.Warnf("iec104 client %s: dropping undecodable ASDU: %v", c.addr, err)
-		}
+		c.log.Warn("dropping undecodable ASDU", "error", err)
 		return
 	}
 	c.mu.Lock()

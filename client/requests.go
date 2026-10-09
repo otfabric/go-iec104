@@ -4,6 +4,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -166,10 +167,85 @@ func rejected(a *asdu.ASDU) error {
 	return nil
 }
 
+// retryable reports whether a failed attempt of an idempotent request is
+// worth repeating: the cause is the connection or a missing answer, not the
+// station's refusal, the caller or the request itself.
+func retryable(parent context.Context, err error) bool {
+	var neg *iec104.NegativeError
+	switch {
+	case parent.Err() != nil, errors.As(err, &neg),
+		errors.Is(err, iec104.ErrClosed), errors.Is(err, iec104.ErrBusy):
+		return false
+	case errors.Is(err, iec104.ErrNotConnected), errors.Is(err, iec104.ErrNotStarted),
+		errors.Is(err, iec104.ErrConnectionLost), errors.Is(err, iec104.ErrTimeout),
+		errors.Is(err, iec104.ErrProtocol), errors.Is(err, context.DeadlineExceeded):
+		return true
+	}
+	return false
+}
+
+// run executes one request: it bounds every attempt by the request timeout,
+// repeats an idempotent request as configured by WithRetry, and reports to
+// the metrics and the log. attempt performs a single try.
+func (c *Client) run(ctx context.Context, req *asdu.ASDU, idempotent bool, attempt func(ctx context.Context) error) error {
+	rm, _ := c.opts.metrics.(iec104.RequestMetrics)
+	remote := c.remoteAddr()
+	begin := time.Now()
+	if rm != nil {
+		rm.OnRequest(remote, req.Type, req.CommonAddr)
+	}
+
+	attempts := 1
+	var delay, maxDelay time.Duration
+	if r := c.opts.retry; r != nil && idempotent {
+		attempts, delay, maxDelay = r.Attempts, r.Backoff, r.MaxBackoff
+	}
+	var err error
+	for i := 1; ; i++ {
+		actx, cancel := c.bound(ctx)
+		err = attempt(actx)
+		cancel()
+		if err == nil || i >= attempts || !retryable(ctx, err) {
+			break
+		}
+		c.log.WarnContext(ctx, "request failed, retrying", "type", req.Type.String(),
+			"ca", req.CommonAddr, "attempt", i, "retry_in", delay.String(), "error", err)
+		if rm != nil {
+			rm.OnRetry(remote, req.Type, req.CommonAddr, i, err)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+		case <-c.closeCh:
+		}
+		timer.Stop()
+		if ctx.Err() != nil || c.isClosed() {
+			break // the last error says why the request did not succeed
+		}
+		delay = min(delay*2, maxDelay)
+	}
+
+	elapsed := time.Since(begin)
+	if rm != nil {
+		rm.OnRequestDone(remote, req.Type, req.CommonAddr, elapsed, err)
+	}
+	if c.log.DebugEnabled() {
+		kv := []any{"type", req.Type.String(), "ca", req.CommonAddr, "duration", elapsed.String()}
+		if err != nil {
+			kv = append(kv, "error", err)
+		}
+		c.log.DebugContext(ctx, "request", kv...)
+	}
+	return err
+}
+
 // confirmed sends req and waits for its confirmation.
-func (c *Client) confirmed(ctx context.Context, req *asdu.ASDU) error {
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
+func (c *Client) confirmed(ctx context.Context, req *asdu.ASDU, idempotent bool) error {
+	return c.run(ctx, req, idempotent, func(ctx context.Context) error { return c.confirmedOnce(ctx, req) })
+}
+
+func (c *Client) confirmedOnce(ctx context.Context, req *asdu.ASDU) error {
 	x, err := c.begin(ctx, req, nil)
 	if err != nil {
 		return err
@@ -212,14 +288,22 @@ func (c *Client) command(ctx context.Context, cause asdu.Cause, ca asdu.CommonAd
 	if !req.Type.IsProcessCommand() {
 		return fmt.Errorf("%w: %T is not a process command", asdu.ErrTypeMismatch, obj)
 	}
-	return c.confirmed(ctx, req)
+	return c.confirmed(ctx, req, false)
 }
 
 // collect runs a request that the station answers with a confirmation, a
 // stream of data and a termination, and returns the data.
-func (c *Client) collect(ctx context.Context, req *asdu.ASDU, cause asdu.Cause) ([]*asdu.ASDU, error) {
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
+func (c *Client) collect(ctx context.Context, req *asdu.ASDU, cause asdu.Cause, idempotent bool) ([]*asdu.ASDU, error) {
+	var data []*asdu.ASDU
+	err := c.run(ctx, req, idempotent, func(ctx context.Context) (err error) {
+		// A repeated attempt starts over: what a failed one collected is dropped.
+		data, err = c.collectOnce(ctx, req, cause)
+		return err
+	})
+	return data, err
+}
+
+func (c *Client) collectOnce(ctx context.Context, req *asdu.ASDU, cause asdu.Cause) ([]*asdu.ASDU, error) {
 	x, err := c.begin(ctx, req, func(a *asdu.ASDU) bool {
 		return a.Cause == cause && c.fromStation(req, a)
 	})
@@ -262,7 +346,7 @@ func (c *Client) collect(ctx context.Context, req *asdu.ASDU, cause asdu.Cause) 
 // alongside it.
 func (c *Client) Interrogate(ctx context.Context, ca asdu.CommonAddr, qoi asdu.QOI) ([]*asdu.ASDU, error) {
 	req := asdu.New(asdu.CauseActivation, ca, asdu.Interrogation{Qualifier: qoi})
-	return c.collect(ctx, req, qoi.Cause())
+	return c.collect(ctx, req, qoi.Cause(), true)
 }
 
 // CounterInterrogate runs a counter interrogation (C_CI_NA_1) and collects
@@ -273,16 +357,24 @@ func (c *Client) Interrogate(ctx context.Context, ca asdu.CommonAddr, qoi asdu.Q
 // It follows the same collection rules as [Client.Interrogate].
 func (c *Client) CounterInterrogate(ctx context.Context, ca asdu.CommonAddr, request, freeze uint8) ([]*asdu.ASDU, error) {
 	obj := asdu.CounterInterrogation{Request: request, Freeze: freeze}
-	return c.collect(ctx, asdu.New(asdu.CauseActivation, ca, obj), obj.Cause())
+	// A freeze or reset changes the counters: only a plain read is repeated.
+	return c.collect(ctx, asdu.New(asdu.CauseActivation, ca, obj), obj.Cause(), freeze == asdu.FreezeRead)
 }
 
 // Read requests the current value of one information object (C_RD_NA_1)
 // and returns the ASDU the station sends with cause "request" for that
 // address. An unknown address is reported as [*iec104.NegativeError].
 func (c *Client) Read(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) (*asdu.ASDU, error) {
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
 	req := asdu.New(asdu.CauseRequest, ca, asdu.Read{IOA: ioa})
+	var answer *asdu.ASDU
+	err := c.run(ctx, req, true, func(ctx context.Context) (err error) {
+		answer, err = c.readOnce(ctx, req, ioa)
+		return err
+	})
+	return answer, err
+}
+
+func (c *Client) readOnce(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA) (*asdu.ASDU, error) {
 	x, err := c.begin(ctx, req, func(a *asdu.ASDU) bool {
 		if a.Cause != asdu.CauseRequest || !c.fromStation(req, a) {
 			return false
@@ -318,7 +410,7 @@ func (c *Client) Read(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) (*a
 // the confirmation. The time is sent in the zone of the ASDU parameters,
 // UTC by default.
 func (c *Client) ClockSync(ctx context.Context, ca asdu.CommonAddr, t time.Time) error {
-	return c.confirmed(ctx, asdu.New(asdu.CauseActivation, ca, asdu.ClockSync{Time: asdu.At(t)}))
+	return c.confirmed(ctx, asdu.New(asdu.CauseActivation, ca, asdu.ClockSync{Time: asdu.At(t)}), false)
 }
 
 // TestCommand sends a test command with time tag (C_TS_TA_1) and waits for
@@ -330,12 +422,12 @@ func (c *Client) TestCommand(ctx context.Context, ca asdu.CommonAddr) error {
 	seq := c.testSeq
 	c.mu.Unlock()
 	return c.confirmed(ctx, asdu.New(asdu.CauseActivation, ca,
-		asdu.TestCommand{Counter: seq, Time: asdu.Now()}))
+		asdu.TestCommand{Counter: seq, Time: asdu.Now()}), true)
 }
 
 // ResetProcess sends a reset process command (C_RP_NA_1) and waits for the
 // confirmation. qualifier is [asdu.ResetProcessGeneral] or
 // [asdu.ResetPendingEvents].
 func (c *Client) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier uint8) error {
-	return c.confirmed(ctx, asdu.New(asdu.CauseActivation, ca, asdu.ResetProcess{Qualifier: qualifier}))
+	return c.confirmed(ctx, asdu.New(asdu.CauseActivation, ca, asdu.ResetProcess{Qualifier: qualifier}), false)
 }

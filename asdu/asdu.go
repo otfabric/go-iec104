@@ -113,6 +113,9 @@ func (a *ASDU) Encode(p Params) ([]byte, error) {
 
 // AppendEncode appends the wire encoding of a under the layout p to b.
 func (a *ASDU) AppendEncode(b []byte, p Params) ([]byte, error) {
+	if a == nil {
+		return b, fmt.Errorf("%w: nil ASDU", ErrInvalidValue)
+	}
 	if err := p.Validate(); err != nil {
 		return b, err
 	}

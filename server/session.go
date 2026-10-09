@@ -5,18 +5,22 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"runtime/debug"
+	"time"
 
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/internal/link"
+	"github.com/otfabric/go-iec104/internal/logx"
 )
 
 // Session is one connection from a controlling station. It is safe for
 // concurrent use.
 type Session struct {
 	srv    *Server
+	log    *logx.Logger
 	id     uint64
 	conn   net.Conn
 	link   *link.Link
@@ -38,11 +42,11 @@ func newSession(srv *Server, conn net.Conn) *Session {
 		cancel: cancel,
 	}
 	o := &srv.opts
+	s.log = srv.log.With("session", s.id, "remote", conn.RemoteAddr().String())
 	s.link = link.New(conn, link.Config{
 		Role:    link.Controlled,
 		Params:  o.params,
-		Name:    "iec104 server " + conn.RemoteAddr().String(),
-		Logger:  o.logger,
+		Log:     s.log,
 		Metrics: o.metrics,
 		OnASDU: func(raw []byte) {
 			<-s.ready
@@ -69,7 +73,7 @@ func (s *Session) start() {
 	if m := s.srv.opts.metrics; m != nil {
 		m.OnConnect(s.conn.RemoteAddr())
 	}
-	s.srv.infof("session %d: connected from %s", s.id, s.conn.RemoteAddr())
+	s.log.Info("session connected")
 	s.notify(iec104.StateStopped, nil)
 	close(s.ready)
 }
@@ -90,9 +94,9 @@ func (s *Session) onClose(err error) {
 		m.OnDisconnect(s.conn.RemoteAddr(), err)
 	}
 	if err != nil {
-		s.srv.infof("session %d: disconnected: %v", s.id, err)
+		s.log.Info("session disconnected", "error", err)
 	} else {
-		s.srv.infof("session %d: closed", s.id)
+		s.log.Info("session closed")
 	}
 	s.notify(iec104.StateDisconnected, err)
 }
@@ -104,7 +108,7 @@ func (s *Session) onASDU(raw []byte) {
 		if m := o.metrics; m != nil {
 			m.OnDecodeError(s.conn.RemoteAddr(), err)
 		}
-		s.srv.warnf("session %d: dropping undecodable ASDU: %v", s.id, err)
+		s.log.Warn("dropping undecodable ASDU", "error", err)
 		return
 	}
 	if o.commonAddrs != nil && !o.asduParams.IsBroadcast(a.CommonAddr) {
@@ -113,11 +117,13 @@ func (s *Session) onASDU(raw []byte) {
 			return
 		}
 	}
+	if hm, ok := o.metrics.(iec104.HandlerMetrics); ok {
+		begin := time.Now()
+		defer func() { hm.OnHandled(s.conn.RemoteAddr(), a.Type, a.Cause, time.Since(begin)) }()
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			if o.logger != nil {
-				o.logger.Errorf("iec104 server: session %d: handler panic on %s: %v\n%s", s.id, a, r, debug.Stack())
-			}
+			s.log.Error("handler panic", "asdu", a.String(), "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 			go func() { _ = s.Close() }()
 		}
 	}()

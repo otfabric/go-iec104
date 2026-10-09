@@ -53,26 +53,30 @@ type Reconnect struct {
 type Option func(*options)
 
 type options struct {
-	params        apci.Params
-	asduParams    asdu.Params
-	originator    uint8
-	handler       Handler
-	onState       func(iec104.State, error)
-	logger        iec104.Logger
-	metrics       iec104.Metrics
-	dialer        Dialer
-	tls           *tls.Config
-	autoStart     bool
-	reconnect     *Reconnect
-	requestTimout time.Duration
+	params         apci.Params
+	asduParams     asdu.Params
+	originator     uint8
+	handler        Handler
+	onState        func(iec104.State, error)
+	logger         iec104.Logger
+	metrics        iec104.Metrics
+	dialer         Dialer
+	tls            *tls.Config
+	autoStart      bool
+	reconnect      *Reconnect
+	retry          *Retry
+	onStart        func(ctx context.Context, c *Client)
+	onSwitch       func(active *Client)
+	stateTap       func() // Group: called after every state change
+	requestTimeout time.Duration
 }
 
 func defaultOptions() options {
 	return options{
-		params:        apci.DefaultParams(),
-		asduParams:    asdu.IEC104,
-		autoStart:     true,
-		requestTimout: 10 * time.Second,
+		params:         apci.DefaultParams(),
+		asduParams:     asdu.IEC104,
+		autoStart:      true,
+		requestTimeout: 10 * time.Second,
 	}
 }
 
@@ -160,9 +164,78 @@ func WithReconnect(r Reconnect) Option {
 	}
 }
 
+// Retry configures automatic retries of idempotent requests.
+type Retry struct {
+	// Attempts is the total number of attempts, the first one included.
+	// Default 3.
+	Attempts int
+	// Backoff is the delay before the second attempt; it doubles with
+	// every further attempt. Default 500ms.
+	Backoff time.Duration
+	// MaxBackoff caps the delay. Default 10s.
+	MaxBackoff time.Duration
+}
+
+// WithRetry makes the client repeat requests that are safe to repeat when
+// they fail for a transient reason. Zero fields of r take their defaults.
+//
+// Retried: [Client.Interrogate], [Client.CounterInterrogate] with
+// [asdu.FreezeRead], [Client.Read] and [Client.TestCommand]. They only read
+// from the station.
+//
+// Never retried: [Client.Command], [Client.Deactivate], [Client.ClockSync],
+// [Client.ResetProcess] and [Client.Send]. A command whose confirmation was
+// lost may already have operated the process, and IEC 60870-5-104 has no way
+// to ask; repeating it is the application's decision.
+//
+// A request is repeated when the connection was lost or is not established,
+// or when the station did not answer within the request timeout. It is not
+// repeated when the station refused it ([*iec104.NegativeError]), when an
+// identical request is pending or when the caller's context ended. Combine
+// with [WithReconnect]: the backoff gives the client time to come back.
+//
+// With retries enabled the request timeout bounds each attempt, also when
+// the caller's context has a deadline; that deadline bounds the whole call.
+func WithRetry(r Retry) Option {
+	return func(o *options) {
+		if r.Attempts <= 0 {
+			r.Attempts = 3
+		}
+		if r.Backoff <= 0 {
+			r.Backoff = 500 * time.Millisecond
+		}
+		if r.MaxBackoff < r.Backoff {
+			r.MaxBackoff = max(10*time.Second, r.Backoff)
+		}
+		o.retry = &r
+	}
+}
+
+// WithStartHandler registers a function that runs each time the client has
+// established a connection and started data transfer on it: after
+// [Client.Connect] and after every automatic reconnect. It is the place for
+// what a controlling station does on a fresh connection, typically a general
+// interrogation and a clock synchronization.
+//
+// f runs on its own goroutine and may call any method of the client. ctx is
+// cancelled when that connection ends or the client is closed.
+func WithStartHandler(f func(ctx context.Context, c *Client)) Option {
+	return func(o *options) { o.onStart = f }
+}
+
+// WithSwitchHandler registers a callback of a [Group]: it is called when
+// another connection of the group becomes the active one, with that
+// connection's client, or with nil when no connection is available any more.
+// It runs on the group's supervisor goroutine and must not block. A plain
+// [Client] ignores the option.
+func WithSwitchHandler(f func(active *Client)) Option {
+	return func(o *options) { o.onSwitch = f }
+}
+
 // WithRequestTimeout bounds how long a request method waits for the
 // confirmation or the data it asked for when its context has no deadline.
-// Default 10s. Zero or negative disables the bound.
+// Default 10s. Zero or negative disables the bound. With [WithRetry] it
+// bounds every attempt, whatever the context.
 func WithRequestTimeout(d time.Duration) Option {
-	return func(o *options) { o.requestTimout = d }
+	return func(o *options) { o.requestTimeout = d }
 }
