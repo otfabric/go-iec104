@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	iec104 "github.com/otfabric/go-iec104"
@@ -19,12 +20,16 @@ import (
 // Session is one connection from a controlling station. It is safe for
 // concurrent use.
 type Session struct {
-	srv    *Server
-	group  *group
-	log    *logx.Logger
-	id     uint64
-	conn   net.Conn
-	link   *link.Link
+	srv   *Server
+	group *group
+	log   *logx.Logger
+	id    uint64
+	conn  net.Conn
+	link  *link.Link
+	// lk is link for the redundancy group, which is told about data
+	// transfer by the link's protocol goroutine, possibly before newSession
+	// has returned and set link.
+	lk     atomic.Pointer[link.Link]
 	ready  chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -50,36 +55,54 @@ func newSession(srv *Server, conn net.Conn, grp *group) *Session {
 		Params:  o.params,
 		Log:     s.log,
 		Metrics: o.metrics,
-		OnASDU: func(raw []byte) {
+		// The group follows the link itself, in step with the frames.
+		OnTransfer: func(l *link.Link, started bool, epoch uint64) {
+			s.lk.Store(l)
+			if started {
+				s.group.started(s)
+			} else {
+				s.group.stopped(s, epoch)
+			}
+		},
+		// The application is told by the dispatcher, in order: that the
+		// session exists and is stopped comes first, like everything else
+		// on the dispatcher's goroutine.
+		OnOpen: func() {
 			<-s.ready
+			if m := s.srv.opts.metrics; m != nil {
+				m.OnConnect(s.conn.RemoteAddr())
+			}
+			s.log.Info("session connected")
+			s.notify(iec104.StateStopped, nil)
+		},
+		OnASDU: func(raw []byte) {
 			s.onASDU(raw)
 		},
 		OnState: func(started bool) {
-			<-s.ready
 			if started {
-				s.group.started(s)
 				s.notify(iec104.StateStarted, nil)
 			} else {
-				s.group.stopped(s)
 				s.notify(iec104.StateStopped, nil)
 			}
 		},
 		OnClose: func(err error) {
-			<-s.ready
 			s.onClose(err)
 		},
 	})
 	return s
 }
 
-// start announces the session and releases its callbacks.
+// start releases the callbacks of the session, the first of which
+// announces it. The server calls it once the session is registered.
 func (s *Session) start() {
-	if m := s.srv.opts.metrics; m != nil {
-		m.OnConnect(s.conn.RemoteAddr())
-	}
-	s.log.Info("session connected")
-	s.notify(iec104.StateStopped, nil)
 	close(s.ready)
+}
+
+// transferring reports whether data transfer is started, for the
+// redundancy group: see lk.
+func (s *Session) transferring() bool {
+	l := s.lk.Load()
+	return l != nil && l.Started()
 }
 
 func (s *Session) notify(state iec104.State, err error) {
@@ -94,7 +117,7 @@ func (s *Session) onClose(err error) {
 	}
 	s.cancel()
 	s.srv.remove(s)
-	s.group.stopped(s)
+	s.group.ended(s)
 	if m := s.srv.opts.metrics; m != nil {
 		m.OnDisconnect(s.conn.RemoteAddr(), err)
 	}
@@ -166,8 +189,11 @@ func (s *Session) Err() error {
 	return nil
 }
 
-// Close closes the connection. It is idempotent and may be called from a
-// handler.
+// Close closes the connection. When it returns the [Handler] and the state
+// handler have been called for this session for the last time: a call in
+// progress has returned and none follows. It may be called from a handler,
+// which it then cannot wait for; a handler must not close another session
+// whose handler closes this one. Close is idempotent.
 func (s *Session) Close() error {
 	err := s.link.Close()
 	// The close notification follows asynchronously; the session is gone

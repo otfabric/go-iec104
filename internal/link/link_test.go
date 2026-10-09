@@ -562,6 +562,8 @@ func TestReceiveBackpressure(t *testing.T) {
 	params.W = 4
 	gate := make(chan struct{})
 	l, p, rec := setup(t, Controlling, params, func(r *recorder) { r.gate = gate })
+	open := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(open) // before the link is closed: Close waits for the callback
 	start(t, l, p)
 
 	const n = hardQueue + 500
@@ -577,26 +579,30 @@ func TestReceiveBackpressure(t *testing.T) {
 	}()
 
 	// Acknowledgements stop at the soft limit: the last S frame covers at
-	// most the frames that were queued when it was reached.
-	var acked uint16
-	for acked+uint16(params.W) <= softQueue {
-		f := p.read()
-		if f.Format != apci.FormatS {
-			t.Fatalf("peer got %s, want an S frame", f)
-		}
-		acked = f.RecvSeq
-	}
+	// most the frames that were queued when it was reached. How far they
+	// got before that depends on how far the reader was ahead.
 	eventually(t, "queue to fill", func() bool { return l.queueLen() >= hardQueue })
 	time.Sleep(50 * time.Millisecond)
 	if q := l.queueLen(); q > hardQueue+2 {
 		t.Fatalf("queue grew to %d, limit %d", q, hardQueue)
 	}
-	_ = p.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	if f, err := apci.ReadFrame(p.conn); err == nil {
-		t.Fatalf("peer got %s while the link is throttled (last acknowledged %d)", f, acked)
+	var acked uint16
+	for {
+		_ = p.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		f, err := apci.ReadFrame(p.conn)
+		if err != nil {
+			break // the link is throttled: nothing more is acknowledged
+		}
+		if f.Format != apci.FormatS {
+			t.Fatalf("peer got %s, want an S frame", f)
+		}
+		acked = f.RecvSeq
+	}
+	if acked > softQueue+uint16(params.W) {
+		t.Fatalf("the link acknowledged %d frames with its callback blocked, soft limit %d", acked, softQueue)
 	}
 
-	close(gate)
+	open()
 	<-done
 	eventually(t, "all ASDUs", func() bool { return rec.count() == n })
 	rec.mu.Lock()
@@ -623,6 +629,8 @@ func TestThrottledLinkStillProcessesAcks(t *testing.T) {
 	params.K = 2
 	gate := make(chan struct{})
 	l, p, rec := setup(t, Controlling, params, func(r *recorder) { r.gate = gate })
+	open := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(open) // before the link is closed: Close waits for the callback
 	start(t, l, p)
 	ctx := context.Background()
 
@@ -655,7 +663,7 @@ func TestThrottledLinkStillProcessesAcks(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Send not released by an acknowledgement while throttled")
 	}
-	close(gate)
+	open()
 	eventually(t, "all ASDUs", func() bool { return rec.count() == softQueue+10 })
 }
 

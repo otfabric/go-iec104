@@ -444,7 +444,14 @@ func TestDataTransfer(t *testing.T) {
 			if err := c.StartDT(ctx); err != nil {
 				t.Fatalf("StartDT: %v", err)
 			}
-			testutil.Eventually(t, "session started", session.Started)
+			// The station is started by the time its confirmation arrives,
+			// not some time after.
+			if !session.Started() {
+				t.Fatalf("round %d: STARTDT confirmed while the session is still stopped", round)
+			}
+			if err := session.Send(ctx, asdu.New(asdu.CauseSpontaneous, l.ca, asdu.SinglePoint{IOA: 100, Value: true})); err != nil {
+				t.Fatalf("round %d: Session.Send right after STARTDT con: %v", round, err)
+			}
 			data, err := c.Interrogate(ctx, l.ca, asdu.QOIStation)
 			if err != nil || !station.SameObserved(station.Observe(t, data), l.fx.Expected(false)) {
 				t.Fatalf("Interrogate in round %d: %v", round, err)
@@ -454,6 +461,16 @@ func TestDataTransfer(t *testing.T) {
 			}
 			if c.State() != iec104.StateStopped || session.Started() {
 				t.Fatalf("after STOPDT: client %s, session started %v", c.State(), session.Started())
+			}
+			// Likewise stopped by the time STOPDT con arrives.
+			if err := session.Send(ctx, asdu.New(asdu.CauseSpontaneous, l.ca, asdu.SinglePoint{IOA: 100})); !errors.Is(err, iec104.ErrNotStarted) {
+				t.Fatalf("round %d: Session.Send right after STOPDT con: %v", round, err)
+			}
+			if _, err := c.ListFiles(ctx, l.ca, 0); !errors.Is(err, iec104.ErrNotStarted) {
+				t.Fatalf("round %d: ListFiles while stopped: %v", round, err)
+			}
+			if err := c.PutFile(ctx, l.ca, station.FirstUploadIOA, 1, []byte("x")); !errors.Is(err, iec104.ErrNotStarted) {
+				t.Fatalf("round %d: PutFile while stopped: %v", round, err)
 			}
 		}
 		if err := c.Close(); err != nil {
@@ -770,6 +787,20 @@ func TestNarrowParameters(t *testing.T) {
 	if got, err := c.GetFile(ctx, l.ca, f.IOA, f.Name); err != nil || !bytes.Equal(got, f.Content()) {
 		t.Errorf("GetFile: %v", err)
 	}
+	// Upload and directory with two-octet addresses.
+	note := bytes.Repeat([]byte("narrow "), 100)
+	if err := c.PutFile(ctx, l.ca, station.FirstUploadIOA, 1, note); err != nil {
+		t.Errorf("PutFile: %v", err)
+	}
+	if got, ok := l.st.Uploaded(station.FirstUploadIOA); !ok || !bytes.Equal(got, note) {
+		t.Errorf("delivered file at the station: %d octets", len(got))
+	}
+	if dir, err := c.ListFiles(ctx, l.ca, 0); err != nil || len(dir) != len(l.fx.Files)+1 {
+		t.Errorf("ListFiles: %d entries, %v", len(dir), err)
+	}
+	if err := c.PutFile(ctx, l.ca, 70000, 1, note); !errors.Is(err, asdu.ErrInvalidValue) {
+		t.Errorf("PutFile to an address beyond two octets: %v", err)
+	}
 	// An address that does not fit two octets never leaves the client.
 	if _, err := c.Read(ctx, l.ca, 70000); !errors.Is(err, asdu.ErrInvalidValue) {
 		t.Errorf("Read of an address beyond two octets: %v", err)
@@ -783,4 +814,102 @@ func TestNarrowParameters(t *testing.T) {
 	if _, err := other.Interrogate(ctx, l.ca, asdu.QOIStation); err == nil {
 		t.Error("an interrogation with three-octet addresses was answered by a station with two-octet ones")
 	}
+}
+
+// Files in control direction and the directory: what a controlling station
+// delivers can be listed and fetched again, by it and by another one.
+func TestFileUploadAndDirectory(t *testing.T) {
+	transports(t, func(t *testing.T, l *link) {
+		ctx := context.Background()
+		c := l.dial(t)
+
+		// The directory of a fresh station is the fixture's.
+		dir, err := c.ListFiles(ctx, l.ca, 0)
+		if err != nil {
+			t.Fatalf("ListFiles: %v", err)
+		}
+		if len(dir) != len(l.fx.Files) {
+			t.Fatalf("directory has %d entries, the fixture %d files", len(dir), len(l.fx.Files))
+		}
+		for i, f := range l.fx.Files {
+			e := dir[i]
+			last := i == len(dir)-1
+			if e.IOA != f.IOA || e.Name != f.Name || int(e.Length) != f.Size || !e.Time.Equal(station.FixtureFileTime) ||
+				(e.Status&asdu.FileLastOfDirectory != 0) != last {
+				t.Errorf("entry %d: %+v, want file %+v (last: %v)", i, e, f, last)
+			}
+		}
+
+		// Deliver files of several shapes.
+		uploads := map[asdu.IOA][][]byte{
+			station.FirstUploadIOA:     {[]byte("a short note")},
+			station.FirstUploadIOA + 1: {bytes.Repeat([]byte{0xA5}, 3000), bytes.Repeat([]byte{0x5A}, 3000), {1, 2, 3}},
+			station.FirstUploadIOA + 2: {},
+			station.FirstUploadIOA + 9: {bytes.Repeat([]byte("0123456789"), 5000)},
+		}
+		for ioa, sections := range uploads {
+			if err := c.PutFile(ctx, l.ca, ioa, 3, sections...); err != nil {
+				t.Fatalf("PutFile %d: %v", ioa, err)
+			}
+			got, ok := l.st.Uploaded(ioa)
+			if want := bytes.Join(sections, nil); !ok || !bytes.Equal(got, want) {
+				t.Errorf("file %d at the station: %d octets, want %d", ioa, len(got), len(want))
+			}
+		}
+		// Not where the station takes files, and not this station.
+		negative(t, c.PutFile(ctx, l.ca, 100, 3, []byte("x")), asdu.CauseUnknownIOA)
+		negative(t, c.PutFile(ctx, l.ca+6, station.FirstUploadIOA, 3, []byte("x")), asdu.CauseUnknownCommonAddr)
+
+		// Another controlling station sees them in the directory and fetches them.
+		other := l.dial(t)
+		dir, err = other.ListFiles(ctx, l.ca, 0)
+		if err != nil || len(dir) != len(l.fx.Files)+len(uploads) {
+			t.Fatalf("directory after the uploads: %d entries, %v", len(dir), err)
+		}
+		for i, e := range dir {
+			if i > 0 && e.IOA <= dir[i-1].IOA {
+				t.Errorf("directory out of order at entry %d", i)
+			}
+			sections, uploaded := uploads[e.IOA]
+			if !uploaded {
+				continue
+			}
+			want := bytes.Join(sections, nil)
+			if e.Name != 3 || int(e.Length) != len(want) || time.Since(e.Time.Time).Abs() > time.Minute {
+				t.Errorf("entry of the delivered file %d: %+v", e.IOA, e)
+			}
+			got, err := other.GetFile(ctx, l.ca, e.IOA, e.Name)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Errorf("fetching the delivered file %d: %d octets, %v", e.IOA, len(got), err)
+			}
+		}
+		if dir[len(dir)-1].Status&asdu.FileLastOfDirectory == 0 {
+			t.Error("the last entry is not marked as the last")
+		}
+		negative(t, func() error { _, err := c.ListFiles(ctx, l.ca, 5); return err }(), asdu.CauseUnknownIOA)
+
+		// Delivering, fetching and listing at once, on one connection.
+		var wg sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ioa := station.FirstUploadIOA + 100 + asdu.IOA(i)
+				data := bytes.Repeat([]byte{byte(i)}, 4000+i)
+				if err := c.PutFile(ctx, l.ca, ioa, 1, data[:2000], data[2000:]); err != nil {
+					t.Errorf("concurrent PutFile %d: %v", i, err)
+					return
+				}
+				if got, err := c.GetFile(ctx, l.ca, ioa, 1); err != nil || !bytes.Equal(got, data) {
+					t.Errorf("concurrent GetFile %d: %v", i, err)
+				}
+			}()
+		}
+		for i := 0; i < 5; i++ {
+			if _, err := c.ListFiles(ctx, l.ca, 0); err != nil {
+				t.Errorf("ListFiles during the transfers: %v", err)
+			}
+		}
+		wg.Wait()
+	})
 }

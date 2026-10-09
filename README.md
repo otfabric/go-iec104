@@ -25,9 +25,10 @@ The library provides:
   sequence numbers, the `k`/`w` flow-control windows and the `t0`..`t3` timers
 - An **ASDU** model and codec for 67 type identifications, file transfer
   included, independent of the transport and reusable for IEC 60870-5-101
-- **File transfer**: `Client.GetFile` downloads a file from a station and
-  `server.FileServer` serves files, with sections, segments, checksums and
-  acknowledgements handled by the library
+- **File transfer** in both directions and the directory: `GetFile`,
+  `PutFile` and `ListFiles` on the client, `server.FileServer` on the
+  station, with sections, segments, checksums and acknowledgements handled
+  by the library
 - What production use needs: `context.Context` on every call, automatic
   reconnect, retries for the requests that are safe to repeat, redundancy
   groups with failover, structured logging, metrics hooks and TLS
@@ -42,7 +43,7 @@ The library provides:
 
 - [go-iec104 - IEC 60870-5-104 Client and Server Library for Go](#go-iec104---iec-60870-5-104-client-and-server-library-for-go)
 	- [Table of contents](#table-of-contents)
-	- [go-iec104 vs lib60870 and j60870](#go-iec104-vs-lib60870-and-j60870)
+	- [go-iec104 vs lib60870, j60870 and wendy512/iec104](#go-iec104-vs-lib60870-j60870-and-wendy512iec104)
 	- [Install](#install)
 	- [Project structure](#project-structure)
 	- [Client quickstart](#client-quickstart)
@@ -57,43 +58,46 @@ The library provides:
 	- [Limitations](#limitations)
 	- [License](#license)
 
-## go-iec104 vs lib60870 and j60870
+## go-iec104 vs lib60870, j60870 and wendy512/iec104
 
 go-iec104 is tested against three other implementations (see
-[Interop tests](#interop-tests)). This section compares it with the two
-most established of them,
-[MZ Automation lib60870-C](https://github.com/mz-automation/lib60870) and
-[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/). Both are good libraries; this table shows
-where the three differ so you can pick the right one for your project.
+[Interop tests](#interop-tests)):
+[MZ Automation lib60870-C](https://github.com/mz-automation/lib60870),
+[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/) and
+[wendy512/iec104](https://github.com/wendy512/iec104) on its engine
+go-iecp5. All are good libraries; this table shows where the four differ so
+you can pick the right one for your project.
 
-| Capability | otfabric/go-iec104 | lib60870-C | j60870 |
-|---|:---:|:---:|:---:|
-| Language | Go | C | Java |
-| License | MIT | GPL-3.0 or commercial | GPL-3.0 |
-| IEC 60870-5-104 client (controlling station) | ✅ | ✅ | ✅ |
-| IEC 60870-5-104 server (controlled station) | ✅ | ✅ | ✅ |
-| IEC 60870-5-101 serial link layer | — by design ¹ | ✅ | — |
-| Process information, commands, system types (1..40, 45..64, 70, 100..107) | ✅ | ✅ | ✅ |
-| Parameter types (110..113) | ✅ | ✅ | ✅ |
-| File transfer types (120..127) | ✅ | ✅ | ✅ |
-| File transfer procedure, monitor direction (download) | ✅ client and server | ✅ server side | — |
-| File transfer procedure, control direction (upload), directory | — | ✅ server side | — |
-| Private types (128..255) | raw payload | raw payload | custom decoder |
-| Configurable `k`, `w`, `t0`..`t3` | ✅ | ✅ | ✅ |
-| TLS (IEC 62351-3) | ✅ `crypto/tls` | ✅ mbedTLS | via socket factory |
-| Blocking request methods (interrogate and collect, command and confirm) | ✅ | — callbacks | — callbacks |
-| Server-side routing with standard refusals (unknown type, cause, address) | ✅ `Mux` | partly built in | unknown type only |
-| Redundancy group, client side (failover, switchover) | ✅ `Group` | — | — |
-| Redundancy groups, server side | ✅ | ✅ | — |
-| Server-side event queue for stopped or absent clients | ✅ acknowledged delivery | ✅ | — |
-| Automatic reconnect with back-off | ✅ | — | — |
-| Automatic retries (read-only requests) | ✅ | — | — |
-| Cancellation and deadlines per call | ✅ `context.Context` | — | — timeouts only |
-| Structured logging | ✅ `log/slog` | — compile-time debug output | — (pluggable logger from 1.8.0) |
-| Metrics hooks | ✅ | — raw message callback | — |
-| Threadless / single-loop operation | — by design ² | ✅ | — |
-| Dependencies | none | none (mbedTLS optional) | none |
-| Cross-tested against other stacks in CI | ✅ against both and a third | — not documented | — not documented |
+| Capability | otfabric/go-iec104 | lib60870-C | j60870 | wendy512/iec104 |
+|---|:---:|:---:|:---:|:---:|
+| Language | Go | C | Java | Go |
+| License | MIT | GPL-3.0 or commercial | GPL-3.0 | Apache-2.0, on an LGPL-3.0 engine |
+| IEC 60870-5-104 client (controlling station) | ✅ | ✅ | ✅ | ✅ |
+| IEC 60870-5-104 server (controlled station) | ✅ | ✅ | ✅ | ✅ |
+| IEC 60870-5-101 serial link layer | — by design ¹ | ✅ | — | — frame format only |
+| Process information, commands, system types (1..40, 45..64, 70, 100..107) | ✅ | ✅ | ✅ | partly ³ |
+| Parameter types (110..113) | ✅ | ✅ | ✅ | ✅ |
+| File transfer types (120..127) | ✅ | ✅ | ✅ | — identifiers only |
+| File transfer procedure, monitor direction (download) | ✅ client and server | ✅ server side | — | — |
+| File transfer procedure, control direction (upload) | ✅ client and server | ✅ server side | — | — |
+| File directory | ✅ client and server | — | — | — |
+| Private types (128..255) | raw payload | raw payload | custom decoder | — dropped |
+| Configurable `k`, `w`, `t0`..`t3` | ✅ | ✅ | ✅ | ✅ |
+| TLS (IEC 62351-3) | ✅ `crypto/tls` | ✅ mbedTLS | via socket factory | ✅ `crypto/tls` |
+| Application-layer security (IEC 62351-5) | — types carried, no procedure | — commercial add-on (2013 edition) | — | — |
+| Blocking request methods (interrogate and collect, command and confirm) | ✅ | — callbacks | — callbacks | — callbacks |
+| Server-side routing with standard refusals (unknown type, cause, address) | ✅ `Mux` | partly built in | unknown type only | partly, without the P/N bit |
+| Redundancy group, client side (failover, switchover) | ✅ `Group` | — | — | — |
+| Redundancy groups, server side | ✅ | ✅ | — | — |
+| Server-side event queue for stopped or absent clients | ✅ acknowledged delivery | ✅ | — | — |
+| Automatic reconnect with back-off | ✅ | — | — | fixed interval |
+| Automatic retries (read-only requests) | ✅ | — | — | — |
+| Cancellation and deadlines per call | ✅ `context.Context` | — | — timeouts only | — |
+| Structured logging | ✅ `log/slog` | — compile-time debug output | — (pluggable logger from 1.8.0) | — pluggable printf-style logger |
+| Metrics hooks | ✅ | — raw message callback | — | — |
+| Threadless / single-loop operation | — by design ² | ✅ | — | — |
+| Dependencies | none | none (mbedTLS optional) | none | one (`spf13/cast`) besides its engine |
+| Cross-tested against other stacks in CI | ✅ against all three | — not documented | — not documented | — not documented |
 
 ¹ IEC 60870-5-101 is a different companion standard with its own serial link
 layer (FT 1.2 framing, balanced and unbalanced procedures). It belongs in a
@@ -103,9 +107,14 @@ takes the 101 field sizes.
 ² A mode for C programs without threads. In Go the protocol machine runs on
 goroutines, and a single-threaded variant would add nothing.
 
-✅ = available · — = not available or not documented. For lib60870-C v2.4.1
-and j60870 1.7.2, the versions go-iec104 is tested against, from their
-public sources and documentation as of October 2026. If you spot an
+³ go-iecp5 encodes the commands with time tag (58..63) but has no length
+for them and drops them on reception, as it does the file segment
+(F_SG_NA_1) and every type it does not know.
+
+✅ = available · — = not available or not documented. For lib60870-C
+v2.4.1, j60870 1.7.2 and wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, the
+versions go-iec104 is tested against, from their public sources and
+documentation as of October 2026. If you spot an
 inaccuracy, please [open an issue](https://github.com/otfabric/go-iec104/issues)
 and we will correct it.
 
@@ -144,7 +153,7 @@ go-iec104/
 ├── e2e/                            go-iec104 client against go-iec104 server
 ├── interop/                        tests against lib60870, OpenMUC j60870, wendy512
 │                                   (build tag "interop", needs Docker)
-└── examples/client, examples/server
+└── examples/                       nine programs to start from
 ```
 
 APCI is specific to IEC 60870-5-104 and lives with it. The ASDU package has no
@@ -378,6 +387,7 @@ c, err := client.Dial(ctx, addr, client.WithParams(p))
 | Connection could not be established | `iec104.ErrConnectFailed`, wrapping the cause |
 | Not connected / data transfer stopped | `iec104.ErrNotConnected` / `iec104.ErrNotStarted` |
 | Identical request still pending | `iec104.ErrBusy` |
+| Request method called from a client handler | `iec104.ErrInHandler` |
 | Peer closed or transport failed | `iec104.ErrConnectionLost` |
 | No acknowledgement within `T1` | `iec104.ErrTimeout`; connection closed |
 | Peer broke the protocol | `iec104.ErrProtocol`; connection closed |
@@ -386,6 +396,23 @@ c, err := client.Dial(ctx, addr, client.WithParams(p))
 Full guide: **[ERRORS.md](ERRORS.md)**.
 
 ## Examples
+
+The [examples](examples/README.md) folder has nine programs to start from.
+Seven are self-contained (station and controlling station in one process,
+over TCP on loopback), so they run as they are:
+
+```sh
+go run ./examples/quickstart      # the smallest station and client
+go run ./examples/commands        # select-before-operate, set points, refusals
+go run ./examples/files           # download, upload and directory
+go run ./examples/events          # event queue, broadcast, end of initialization
+go run ./examples/redundancy      # redundancy group, switchover, failover
+go run ./examples/tls             # TLS with certificates on both sides
+go run ./examples/observability   # logs, states, metrics, retries, reconnect
+```
+
+Two are separate programs, for trying the library against another
+implementation or a device:
 
 ```sh
 make build
@@ -479,10 +506,14 @@ image lacks:
 
 ## Limitations
 
-- **File transfer** covers the download of a file from a station
-  (`Client.GetFile`, `server.FileServer`). The transfer in control direction
-  (upload), the directory and deletion have their types in the codec but no
-  procedure: they are left to the application.
+- **No IEC 62351-5 application-layer security.** Its type identifications
+  are named and carried as raw payload, the procedures are not implemented;
+  see [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
+  Use TLS with client certificates.
+- **File transfer** covers download, upload and the directory. Upload and
+  the directory are verified by this repository's own tests only: no
+  reference stack offers them through the interop images yet. File deletion
+  and the query log have their types in the codec but no procedure.
 - **The event queue is in memory.** It survives a control centre that is
   away, not a restart of the station.
 - **Verified against three third-party stacks**, lib60870-C, j60870 and

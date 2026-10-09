@@ -53,10 +53,24 @@ type Server struct {
 	closed    bool
 	listeners map[net.Listener]struct{}
 	sessions  map[*Session]struct{}
-	pending   map[net.Conn]struct{} // accepted, TLS handshake in progress
+	// live holds every session whose callbacks may still run: a session
+	// leaves sessions when it ends or is closed, and live only when its
+	// last callback has returned.
+	live    map[*Session]struct{}
+	pending map[net.Conn]struct{} // accepted, TLS handshake in progress
 
 	groups []*group
 	done   chan struct{} // closed by Close
+
+	// closing is what Close took over: written under mu by the first
+	// Close, and err by the goroutine that finishes it, before it closes
+	// done.
+	closing struct {
+		listeners []net.Listener
+		sessions  []*Session
+		err       error
+		done      chan struct{} // closed when Close has finished everything
+	}
 }
 
 // New returns a server that passes received ASDUs to h. A nil h rejects
@@ -84,9 +98,11 @@ func New(h Handler, opts ...Option) (*Server, error) {
 		log:       logx.New(o.logger, "server"),
 		listeners: make(map[net.Listener]struct{}),
 		sessions:  make(map[*Session]struct{}),
+		live:      make(map[*Session]struct{}),
 		pending:   make(map[net.Conn]struct{}),
 		done:      make(chan struct{}),
 	}
+	srv.closing.done = make(chan struct{})
 	groups, err := newGroups(srv, o.groups, o.queueSize)
 	if err != nil {
 		return nil, err
@@ -199,8 +215,15 @@ func (s *Server) accept(conn net.Conn) {
 	}
 	sess := newSession(s, conn, grp)
 	s.sessions[sess] = struct{}{}
+	s.live[sess] = struct{}{}
 	s.mu.Unlock()
 	sess.start()
+	go func() {
+		<-sess.link.Dispatched()
+		s.mu.Lock()
+		delete(s.live, sess)
+		s.mu.Unlock()
+	}()
 }
 
 // handshake completes the TLS handshake of an accepted connection, bounded
@@ -298,37 +321,58 @@ func (s *Server) Broadcast(ctx context.Context, a *asdu.ASDU) (int, error) {
 	return sent, errors.Join(errs...)
 }
 
-// Close stops listening and closes every session. Serve returns
+// Close stops listening and closes every session, as [Session.Close] does:
+// when it returns no handler is running or will run. Serve returns
 // [ErrServerClosed]. Close is idempotent.
 func (s *Server) Close() error {
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil
-	}
-	s.closed = true
-	close(s.done)
-	listeners := make([]net.Listener, 0, len(s.listeners))
-	for ln := range s.listeners {
-		listeners = append(listeners, ln)
-	}
-	sessions := make([]*Session, 0, len(s.sessions))
-	for sess := range s.sessions {
-		sessions = append(sessions, sess)
-	}
-	for conn := range s.pending {
-		_ = conn.Close()
-	}
-	s.mu.Unlock()
-
-	var err error
-	for _, ln := range listeners {
-		if cerr := ln.Close(); cerr != nil && err == nil {
-			err = cerr
+	first := !s.closed
+	if first {
+		s.closed = true
+		close(s.done)
+		for ln := range s.listeners {
+			s.closing.listeners = append(s.closing.listeners, ln)
+		}
+		// Also the sessions that have ended or were closed while one of
+		// their callbacks is still running.
+		for sess := range s.live {
+			s.closing.sessions = append(s.closing.sessions, sess)
+		}
+		for conn := range s.pending {
+			_ = conn.Close()
 		}
 	}
-	for _, sess := range sessions {
-		_ = sess.Close()
+	sessions := s.closing.sessions
+	s.mu.Unlock()
+
+	if first {
+		go func() {
+			for _, ln := range s.closing.listeners {
+				if cerr := ln.Close(); cerr != nil && s.closing.err == nil {
+					s.closing.err = cerr
+				}
+			}
+			// Every session at once, then wait for each: a Handler that is
+			// slow to return does not keep the others open.
+			for _, sess := range sessions {
+				sess.link.Shutdown()
+			}
+			for _, sess := range sessions {
+				<-sess.link.Dispatched()
+				s.remove(sess)
+			}
+			close(s.closing.done)
+		}()
 	}
-	return err
+	// From inside a callback of one of the sessions Close cannot wait for
+	// that callback: the close completes behind it. Every other caller,
+	// also a second one while the first still waits, returns when no
+	// handler is running any more.
+	for _, sess := range sessions {
+		if sess.link.OnDispatcher() {
+			return nil
+		}
+	}
+	<-s.closing.done
+	return s.closing.err
 }

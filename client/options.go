@@ -53,21 +53,25 @@ type Reconnect struct {
 type Option func(*options)
 
 type options struct {
-	params         apci.Params
-	asduParams     asdu.Params
-	originator     uint8
-	handler        Handler
-	onState        func(iec104.State, error)
-	logger         iec104.Logger
-	metrics        iec104.Metrics
-	dialer         Dialer
-	tls            *tls.Config
-	autoStart      bool
-	reconnect      *Reconnect
-	retry          *Retry
-	onStart        func(ctx context.Context, c *Client)
-	onSwitch       func(active *Client)
-	stateTap       func() // Group: called after every state change
+	params     apci.Params
+	asduParams asdu.Params
+	originator uint8
+	handler    Handler
+	onState    func(iec104.State, error)
+	logger     iec104.Logger
+	metrics    iec104.Metrics
+	dialer     Dialer
+	tls        *tls.Config
+	autoStart  bool
+	reconnect  *Reconnect
+	retry      *Retry
+	onStart    func(ctx context.Context, c *Client)
+	onSwitch   func(active *Client)
+	stateTap   func() // Group: called after every state change
+	// failpoint, when not nil, is called at named points inside the client
+	// where a test wants to hold it: the windows between two steps that
+	// belong together. Tests only.
+	failpoint      func(name string)
 	requestTimeout time.Duration
 }
 
@@ -109,9 +113,12 @@ func WithHandler(h Handler) Option {
 // WithStateHandler registers a callback for connection state changes. err
 // is the reason when the state is [iec104.StateDisconnected] or a
 // reconnect attempt failed, nil otherwise. Notifications are delivered one
-// at a time, in order. The callback runs on the protocol path: it may call
-// [Client.State] but must not block and must not call any other method of
-// the client. Hand anything else to another goroutine.
+// at a time, in order, and each state once: "disconnected" is the last
+// thing a closed client reports.
+//
+// The callback may call the client, [Client.Close] included. It should
+// return soon: the next notification waits for it, and so does a
+// [Client.Close] called from another goroutine.
 func WithStateHandler(f func(state iec104.State, err error)) Option {
 	return func(o *options) { o.onState = f }
 }
@@ -226,8 +233,9 @@ func WithStartHandler(f func(ctx context.Context, c *Client)) Option {
 // WithSwitchHandler registers a callback of a [Group]: it is called when
 // another connection of the group becomes the active one, with that
 // connection's client, or with nil when no connection is available any more.
-// It runs on the group's supervisor goroutine and must not block. A plain
-// [Client] ignores the option.
+// Calls are made one at a time and in order. The callback may call the
+// group, [Group.Switchover] and [Group.Close] included, and should return
+// soon: the next call waits for it. A plain [Client] ignores the option.
 func WithSwitchHandler(f func(active *Client)) Option {
 	return func(o *options) { o.onSwitch = f }
 }

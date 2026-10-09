@@ -3,10 +3,12 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/asdu"
@@ -51,9 +53,13 @@ func WithEventQueue(size int) Option {
 // queued is one event of a group's queue.
 type queued struct {
 	raw []byte
-	// owner is the session the event is in flight on: sent, and not yet
-	// acknowledged by the controlling station.
+	// owner is the session the event is in flight on: handed to its link,
+	// and not yet acknowledged by the controlling station.
 	owner *Session
+	// epoch is the started period of that session the event was sent in,
+	// written by the link at the moment it is sent; 0 while the event is
+	// still on its way to the link.
+	epoch atomic.Uint64
 }
 
 // group is a redundancy group at run time.
@@ -70,6 +76,11 @@ type group struct {
 	overflow bool
 	pumping  bool
 	wake     chan struct{}
+	// sending is the session the pump is handing an event to, and
+	// cancelSend gives that up: a connection whose window is full must not
+	// hold the queue when another has become the active one.
+	sending    *Session
+	cancelSend context.CancelFunc
 }
 
 func newGroups(srv *Server, decl []RedundancyGroup, limit int) ([]*group, error) {
@@ -138,6 +149,7 @@ func (g *group) signal() {
 
 // enqueue appends an event, dropping the oldest one when the queue is full.
 func (g *group) enqueue(raw []byte) {
+	warn := false
 	g.mu.Lock()
 	if len(g.queue) >= g.limit {
 		// Prefer an event that is not in flight; either way the oldest.
@@ -152,13 +164,17 @@ func (g *group) enqueue(raw []byte) {
 		g.dropped++
 		if !g.overflow {
 			g.overflow = true
-			g.srv.log.Warn("event queue full, dropping the oldest events", "group", g.name, "size", g.limit)
+			warn = true
 		}
 	}
 	g.queue = append(g.queue, &queued{raw: raw})
 	start := !g.pumping
 	g.pumping = true
 	g.mu.Unlock()
+	if warn {
+		// Not under mu: the logger is the application's.
+		g.srv.log.Warn("event queue full, dropping the oldest events", "group", g.name, "size", g.limit)
+	}
 	if start {
 		go g.pump()
 	}
@@ -182,45 +198,91 @@ func (g *group) acked(item *queued) {
 
 // release makes the events that were in flight on s pending again: they
 // were not acknowledged, so they are sent on the next active connection.
+// Only events sent in a started period up to epoch are released: one that
+// is still on its way to the link either fails there, which the pump puts
+// right, or goes out in a later period, of which this is not the end.
 // The caller holds g.mu.
-func (g *group) release(s *Session) {
+func (g *group) release(s *Session, epoch uint64) {
 	for _, q := range g.queue {
-		if q.owner == s {
+		if q.owner != s {
+			continue
+		}
+		if e := q.epoch.Load(); e != 0 && e <= epoch {
 			q.owner = nil
+			q.epoch.Store(0)
 		}
 	}
 }
+
+// releaseAll is release for a session that has ended.
+func (g *group) releaseAll(s *Session) {
+	for _, q := range g.queue {
+		if q.owner == s {
+			q.owner = nil
+			q.epoch.Store(0)
+		}
+	}
+}
+
+// The three functions below keep the group in step with its connections.
+// They are called from the protocol goroutine of the session's link, at the
+// moment its data transfer state changes, and not from the dispatcher: the
+// dispatcher may be busy in a Handler while the state has long moved on,
+// and events sent in the meantime must be attributed to the right period.
 
 // started makes s the active connection of the group. A connection that
 // was active before keeps its link but no longer receives queued events;
 // what it had not acknowledged is sent again on s.
 func (g *group) started(s *Session) {
 	g.mu.Lock()
-	if prev := g.active; prev != nil && prev != s {
-		g.release(prev)
-		g.srv.log.Info("redundancy group switched over", "group", g.name, "session", s.id, "previous", prev.id)
+	prev := g.active
+	if prev != nil && prev != s {
+		g.releaseAll(prev)
 	}
 	g.active = s
+	if g.sending != nil && g.sending != s {
+		g.cancelSend()
+	}
+	g.mu.Unlock()
+	g.signal()
+	// Not under mu: the logger is the application's.
+	if prev != nil && prev != s {
+		g.srv.log.Info("redundancy group switched over", "group", g.name, "session", s.id, "previous", prev.id)
+	}
+}
+
+// stopped is called when the started period epoch of s ends.
+func (g *group) stopped(s *Session, epoch uint64) {
+	g.mu.Lock()
+	g.release(s, epoch)
+	g.handOver(s)
 	g.mu.Unlock()
 	g.signal()
 }
 
-// stopped is called when s stops data transfer or ends.
-func (g *group) stopped(s *Session) {
+// ended is called when s is gone.
+func (g *group) ended(s *Session) {
 	g.mu.Lock()
-	g.release(s)
-	if g.active == s {
-		g.active = nil
-		// Another connection of the group may have data transfer started.
-		for _, other := range g.srv.Sessions() {
-			if other != s && other.group == g && other.Started() {
-				g.active = other
-				break
-			}
-		}
-	}
+	g.releaseAll(s)
+	g.handOver(s)
 	g.mu.Unlock()
 	g.signal()
+}
+
+// handOver finds another active connection when s was it. The caller holds
+// g.mu.
+func (g *group) handOver(s *Session) {
+	if g.active != s {
+		return
+	}
+	g.active = nil
+	// Another connection of the group may have data transfer started.
+	for _, other := range g.srv.Sessions() {
+		if other != s && other.group == g && other.transferring() {
+			g.active = other
+			break
+		}
+	}
 }
 
 // next returns the oldest pending event and the session to send it on,
@@ -228,10 +290,11 @@ func (g *group) stopped(s *Session) {
 func (g *group) next() (*queued, *Session) {
 	for {
 		g.mu.Lock()
-		if s := g.active; s != nil && s.Started() {
+		if s := g.active; s != nil && s.transferring() {
 			for _, q := range g.queue {
 				if q.owner == nil {
 					q.owner = s
+					q.epoch.Store(0)
 					g.mu.Unlock()
 					return q, s
 				}
@@ -254,10 +317,23 @@ func (g *group) pump() {
 		if item == nil {
 			return
 		}
-		if err := s.link.SendTracked(s.ctx, item.raw, func() { g.acked(item) }); err != nil {
+		ctx, cancel := context.WithCancel(s.ctx)
+		g.mu.Lock()
+		g.sending, g.cancelSend = s, cancel
+		if g.active != s {
+			cancel() // switched over since next chose s
+		}
+		g.mu.Unlock()
+		err := s.lk.Load().SendQueued(ctx, item.raw, func() { g.acked(item) }, &item.epoch)
+		g.mu.Lock()
+		g.sending, g.cancelSend = nil, nil
+		g.mu.Unlock()
+		cancel()
+		if err != nil {
 			g.mu.Lock()
 			if item.owner == s {
 				item.owner = nil
+				item.epoch.Store(0)
 			}
 			g.mu.Unlock()
 			// The session is stopping or gone: its state change wakes next().

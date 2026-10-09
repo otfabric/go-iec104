@@ -5,6 +5,7 @@ package station
 import (
 	"crypto/tls"
 	"net"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -24,9 +25,89 @@ type Station struct {
 	points   []*stationPoint // sorted by address
 	commands map[asdu.IOA]*stationCommand
 	clock    time.Time
+	files    []File                    // of the fixture
+	uploads  map[asdu.IOA]uploadedFile // delivered by controlling stations
 
 	Server *server.Server
 	Addr   string // host:port; the station listens on all interfaces
+}
+
+// FirstUploadIOA is the first address the station takes files at. Files
+// delivered there can be fetched again and appear in the directory.
+const FirstUploadIOA asdu.IOA = 40000
+
+// FixtureFileTime is the creation time the directory gives the files of the
+// fixture.
+var FixtureFileTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+type uploadedFile struct {
+	name uint16
+	file server.File
+	at   time.Time
+}
+
+// OpenFile implements server.FileSource.
+func (st *Station) OpenFile(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) (server.File, bool) {
+	if ca != st.ca {
+		return server.File{}, false
+	}
+	for _, f := range st.files {
+		if f.IOA == ioa && f.Name == name {
+			return server.NewFile(f.Content(), f.SectionSize), true
+		}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if u, ok := st.uploads[ioa]; ok && u.name == name {
+		return u.file, true
+	}
+	return server.File{}, false
+}
+
+// AcceptFile implements server.FileSink.
+func (st *Station) AcceptFile(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, _ uint16, _ int) bool {
+	return ca == st.ca && ioa >= FirstUploadIOA
+}
+
+// StoreFile implements server.FileSink.
+func (st *Station) StoreFile(_ *server.Session, _ asdu.CommonAddr, ioa asdu.IOA, name uint16, f server.File) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.uploads[ioa] = uploadedFile{name: name, file: f, at: time.Now().UTC().Truncate(time.Millisecond)}
+	return nil
+}
+
+// Uploaded returns the content of the file delivered at ioa.
+func (st *Station) Uploaded(ioa asdu.IOA) ([]byte, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	u, ok := st.uploads[ioa]
+	if !ok {
+		return nil, false
+	}
+	var all []byte
+	for _, sec := range u.file.Sections {
+		all = append(all, sec...)
+	}
+	return all, true
+}
+
+// directory lists the files of the fixture and the delivered ones, by address.
+func (st *Station) directory(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA) []asdu.FileDirectoryEntry {
+	if ca != st.ca || ioa != 0 {
+		return nil
+	}
+	var out []asdu.FileDirectoryEntry
+	for _, f := range st.files {
+		out = append(out, asdu.FileDirectoryEntry{IOA: f.IOA, Name: f.Name, Length: uint32(f.Size), Time: asdu.At(FixtureFileTime)})
+	}
+	st.mu.Lock()
+	for a, u := range st.uploads {
+		out = append(out, asdu.FileDirectoryEntry{IOA: a, Name: u.name, Length: uint32(u.file.Len()), Time: asdu.At(u.at)})
+	}
+	st.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].IOA < out[j].IOA })
+	return out
 }
 
 type stationPoint struct {
@@ -88,15 +169,10 @@ func start(t testing.TB, fx *Fixture, tlsConfig *tls.Config, opts ...server.Opti
 	mux.HandleFunc(asdu.C_TS_TA_1, func(s *server.Session, req *asdu.ASDU) { _ = s.Confirm(st.own(req)) })
 	mux.Handle(server.HandlerFunc(st.command), server.ProcessCommands...)
 	if len(fx.Files) > 0 {
-		mux.Handle(server.NewFileServer(server.FileSourceFunc(
-			func(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) (server.File, bool) {
-				for _, f := range fx.Files {
-					if f.IOA == ioa && f.Name == name && ca == st.ca {
-						return server.NewFile(f.Content(), f.SectionSize), true
-					}
-				}
-				return server.File{}, false
-			})), server.FileTypes...)
+		st.files, st.uploads = fx.Files, map[asdu.IOA]uploadedFile{}
+		files := server.NewFileServer(st)
+		files.Sink, files.Directory = st, st.directory
+		mux.Handle(files, server.FileTypes...)
 	}
 
 	params := apci.DefaultParams()

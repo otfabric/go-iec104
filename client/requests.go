@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	iec104 "github.com/otfabric/go-iec104"
@@ -19,6 +21,10 @@ import (
 type exchange struct {
 	req   *asdu.ASDU
 	match func(a *asdu.ASDU) bool
+	// epoch is the started period of the link the request went out in; it
+	// is very large until the request is sent, so that the end of an
+	// earlier period leaves a request that is still on its way alone.
+	epoch atomic.Uint64
 
 	mu    sync.Mutex
 	items []*asdu.ASDU
@@ -88,9 +94,19 @@ func (c *Client) mirrored(req, a *asdu.ASDU) bool {
 	if a.CommonAddr != req.CommonAddr && !c.opts.asduParams.IsBroadcast(req.CommonAddr) {
 		return false
 	}
+	// A confirmation answers the request of its own kind: the confirmation
+	// of a deactivation that was given up on must not pass for that of the
+	// activation which followed it, nor the other way round.
 	switch a.Cause {
-	case asdu.CauseActivationCon, asdu.CauseDeactivationCon, asdu.CauseActivationTerm,
-		asdu.CauseUnknownType, asdu.CauseUnknownCause, asdu.CauseUnknownCommonAddr, asdu.CauseUnknownIOA:
+	case asdu.CauseActivationCon, asdu.CauseActivationTerm:
+		if req.Cause == asdu.CauseDeactivation {
+			return false
+		}
+	case asdu.CauseDeactivationCon:
+		if req.Cause != asdu.CauseDeactivation {
+			return false
+		}
+	case asdu.CauseUnknownType, asdu.CauseUnknownCause, asdu.CauseUnknownCommonAddr, asdu.CauseUnknownIOA:
 	default:
 		return false
 	}
@@ -107,6 +123,14 @@ func (c *Client) fromStation(req, a *asdu.ASDU) bool {
 	return a.CommonAddr == req.CommonAddr || c.opts.asduParams.IsBroadcast(req.CommonAddr)
 }
 
+// processData is fromStation for a request that is answered with process
+// data: an interrogation or a read. What belongs to file transfer does not
+// answer it, though a directory carries the cause "request" as the answer
+// to a read does, and may list a file at the address that is being read.
+func (c *Client) processData(req, a *asdu.ASDU) bool {
+	return !a.Type.IsFileTransfer() && c.fromStation(req, a)
+}
+
 // begin registers an exchange for req, sends req and returns the exchange.
 // also, when not nil, selects further ASDUs to collect besides the mirrors
 // of req. The caller must call end.
@@ -116,7 +140,13 @@ func (c *Client) begin(ctx context.Context, req *asdu.ASDU, also func(a *asdu.AS
 	if err != nil {
 		return nil, err
 	}
+	// The answer is delivered by the goroutine a callback runs on, and by
+	// none while a state notification is being delivered ahead of it.
+	if c.inCallback() {
+		return nil, fmt.Errorf("%w: %s", iec104.ErrInHandler, req.Type)
+	}
 	x := &exchange{req: req, sig: make(chan struct{}, 1)}
+	x.epoch.Store(math.MaxUint64)
 	x.match = func(a *asdu.ASDU) bool {
 		return c.mirrored(req, a) || (also != nil && also(a))
 	}
@@ -141,7 +171,10 @@ func (c *Client) begin(ctx context.Context, req *asdu.ASDU, also func(a *asdu.AS
 	c.exchanges = append(c.exchanges, x)
 	c.mu.Unlock()
 
-	if err := l.Send(ctx, raw); err != nil {
+	// The link stamps the exchange with the started period the request
+	// goes out in, at the moment it does: the end of that period cannot
+	// slip in between sending and stamping.
+	if err := l.SendStamped(ctx, raw, &x.epoch); err != nil {
 		c.end(x)
 		return nil, err
 	}
@@ -313,7 +346,7 @@ func (c *Client) collect(ctx context.Context, req *asdu.ASDU, cause asdu.Cause, 
 
 func (c *Client) collectOnce(ctx context.Context, req *asdu.ASDU, cause asdu.Cause) ([]*asdu.ASDU, error) {
 	x, err := c.begin(ctx, req, func(a *asdu.ASDU) bool {
-		return a.Cause == cause && c.fromStation(req, a)
+		return a.Cause == cause && c.processData(req, a)
 	})
 	if err != nil {
 		return nil, err
@@ -390,7 +423,7 @@ func (c *Client) Read(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) (*a
 
 func (c *Client) readOnce(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA) (*asdu.ASDU, error) {
 	x, err := c.begin(ctx, req, func(a *asdu.ASDU) bool {
-		if a.Cause != asdu.CauseRequest || !c.fromStation(req, a) {
+		if a.Cause != asdu.CauseRequest || !c.processData(req, a) {
 			return false
 		}
 		for _, o := range a.Objects {

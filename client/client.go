@@ -3,13 +3,16 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
@@ -27,16 +30,39 @@ type Client struct {
 
 	mu        sync.Mutex
 	link      *link.Link
-	remote    net.Addr // of the current or the last connection
+	last      *link.Link // the most recent link, current or ended
+	remote    net.Addr   // of the current or the last connection
 	state     iec104.State
 	closed    bool
 	dialing   bool // a connect attempt owns the connection state
 	exchanges []*exchange
 	testSeq   uint16
 
-	notifyMu sync.Mutex
-	closeCh  chan struct{}
-	wg       sync.WaitGroup
+	// State notifications are queued and delivered one at a time, in
+	// order, by whichever goroutine finds the queue idle (see notify).
+	notifyMu  sync.Mutex
+	notices   []notice
+	queued    uint64 // notices ever queued
+	delivered uint64 // notices whose callback has returned
+	notifying bool
+	notifier  atomic.Uint64 // goroutine delivering notices, 0 when idle
+	idle      *sync.Cond    // on notifyMu: signalled after every delivery
+
+	// dispatching is the most recent link, readable without c.mu.
+	dispatching atomic.Pointer[link.Link]
+
+	closeCh   chan struct{}
+	closeDone chan struct{} // closed when Close has finished everything
+	// quiet is set when the client is closed from inside one of its
+	// callbacks: the Handler is not called again. A Close from elsewhere
+	// waits instead, until the Handler has seen what was received.
+	quiet atomic.Bool
+	wg    sync.WaitGroup
+}
+
+type notice struct {
+	state iec104.State
+	err   error
 }
 
 // New returns a client for the controlled station at addr ("host:port").
@@ -60,12 +86,15 @@ func New(addr string, opts ...Option) (*Client, error) {
 		}
 		addr = net.JoinHostPort(addr, strconv.Itoa(port))
 	}
-	return &Client{
-		addr:    addr,
-		opts:    o,
-		log:     logx.New(o.logger, "client", "remote", addr),
-		closeCh: make(chan struct{}),
-	}, nil
+	c := &Client{
+		addr:      addr,
+		opts:      o,
+		log:       logx.New(o.logger, "client", "remote", addr),
+		closeCh:   make(chan struct{}),
+		closeDone: make(chan struct{}),
+	}
+	c.idle = sync.NewCond(&c.notifyMu)
+	return c, nil
 }
 
 // Dial creates a client and connects it. It is shorthand for [New] followed
@@ -106,11 +135,16 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.mu.Unlock()
 		return iec104.ErrClosed
 	case c.dialing || c.state != iec104.StateDisconnected:
+		state := c.state
 		c.mu.Unlock()
-		return fmt.Errorf("%w: client is %s", iec104.ErrBusy, c.state)
+		return fmt.Errorf("%w: client is %s", iec104.ErrBusy, state)
 	}
 	c.dialing = true
+	// Counted under the lock that guards closed: Close waits for a Connect
+	// that got past the check above, and for what it reports.
+	c.wg.Add(1)
 	c.mu.Unlock()
+	defer c.wg.Done()
 	c.setState(iec104.StateConnecting, nil)
 
 	err := c.connect(ctx)
@@ -156,10 +190,25 @@ func (c *Client) connect(ctx context.Context) error {
 		Params:  c.opts.params,
 		Log:     c.log,
 		Metrics: c.opts.metrics,
-		OnASDU:  func(raw []byte) { c.onASDU(remote, raw) },
+		Drain:   true,
+		// A group follows the link itself: the dispatcher may be busy in
+		// the Handler long after the connection has changed or is lost.
+		OnTransfer: func(*link.Link, bool, uint64) {
+			if f := c.opts.stateTap; f != nil {
+				f()
+			}
+		},
+		OnASDU: func(raw []byte) { c.onASDU(remote, raw) },
 		OnState: func(bool) {
 			<-ready
 			c.syncState(l)
+		},
+		OnStopped: func(epoch uint64) {
+			<-ready
+			// Nothing more arrives for a started period that has ended, and
+			// this runs after everything that arrived in it: a request of
+			// that period that is still waiting will not be answered.
+			c.failPending(l, epoch, iec104.ErrNotStarted)
 		},
 		OnClose: func(err error) {
 			<-ready
@@ -175,6 +224,8 @@ func (c *Client) connect(ctx context.Context) error {
 		return iec104.ErrClosed
 	}
 	c.link = l
+	c.last = l
+	c.dispatching.Store(l)
 	c.remote = remote
 	c.mu.Unlock()
 	close(ready)
@@ -214,6 +265,34 @@ func (c *Client) connect(ctx context.Context) error {
 		}()
 	}
 	return nil
+}
+
+// at marks a named point for tests; see options.failpoint.
+func (c *Client) at(name string) {
+	if f := c.opts.failpoint; f != nil {
+		f(name)
+	}
+}
+
+// failPending ends the requests sent on l in a started period up to epoch
+// that still wait for an answer.
+func (c *Client) failPending(l *link.Link, epoch uint64, err error) {
+	c.mu.Lock()
+	var pending, keep []*exchange
+	if c.link == l {
+		for _, x := range c.exchanges {
+			if x.epoch.Load() <= epoch {
+				pending = append(pending, x)
+			} else {
+				keep = append(keep, x)
+			}
+		}
+		c.exchanges = keep
+	}
+	c.mu.Unlock()
+	for _, x := range pending {
+		x.fail(err)
+	}
 }
 
 // detach forgets l so that its OnClose callback is ignored.
@@ -257,22 +336,59 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 // Close closes the connection and stops reconnecting. Pending requests fail
-// with [iec104.ErrClosed]. Close is idempotent.
+// with [iec104.ErrClosed]. When Close returns the [Handler] and the state
+// handler have been called for the last time: a call in progress has
+// returned and none follows. Before that the Handler is given what the
+// connection had received, and acknowledged to the station, up to the
+// moment of the call.
+//
+// Called from the Handler or the state handler, Close cannot wait for that
+// call: it returns at once, the Handler is not called again, and
+// "disconnected" is reported after the call has returned. Close is
+// idempotent; every caller outside a callback returns when the client is
+// closed.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil
+	first := !c.closed
+	if first {
+		c.closed = true
+		close(c.closeCh)
 	}
-	c.closed = true
-	close(c.closeCh)
-	l := c.link
+	// The last link, not the current one: a link that has just ended is no
+	// longer current while its dispatcher may still be telling the
+	// application so.
+	l := c.last
 	c.mu.Unlock()
 
+	// From inside a callback Close cannot wait for that callback to return:
+	// the close completes behind it, and what was received and not yet
+	// handled is discarded. Every other caller, also a second one while the
+	// first is still waiting, returns when the Handler has been given
+	// everything the station was told has arrived.
+	inside := c.inCallback()
+	if inside {
+		c.quiet.Store(true)
+	}
+	if first {
+		if l != nil {
+			l.Shutdown()
+		}
+		go c.finishClose(l)
+	}
+	if inside {
+		return nil
+	}
+	<-c.closeDone
+	return nil
+}
+
+// finishClose completes Close: the link has delivered its last callback,
+// every connect attempt has ended, and "disconnected" has been reported.
+func (c *Client) finishClose(l *link.Link) {
 	if l != nil {
-		_ = l.Close()
-		// The link's close notification follows asynchronously; settle the
-		// client now so that Close returns with everything released.
+		<-l.Dispatched()
+		// The link's close notification has settled the client, unless the
+		// link was already detached from it.
 		c.mu.Lock()
 		var pending []*exchange
 		if c.link == l {
@@ -286,35 +402,108 @@ func (c *Client) Close() error {
 	}
 	c.wg.Wait()
 	c.setState(iec104.StateDisconnected, nil)
-	return nil
+	c.flushNotices()
+	close(c.closeDone)
+}
+
+// inCallback reports whether the caller is inside a callback of this
+// client: on the goroutine that is delivering a state notification, or on
+// the dispatcher of its link, which calls the Handler.
+func (c *Client) inCallback() bool {
+	if c.notifier.Load() == goroutineID() {
+		return true
+	}
+	c.mu.Lock()
+	cur, last := c.link, c.last
+	c.mu.Unlock()
+	return (cur != nil && cur.OnDispatcher()) || (last != nil && last.OnDispatcher())
 }
 
 // StartDT starts data transfer (STARTDT act) and waits for the
 // confirmation. It is a no-op when data transfer is already started.
 func (c *Client) StartDT(ctx context.Context) error {
+	ctx, cancel := c.bound(ctx)
+	defer cancel()
+	return c.startDT(ctx)
+}
+
+// startDT is StartDT bounded by ctx alone.
+func (c *Client) startDT(ctx context.Context) error {
 	l, err := c.current()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
 	err = l.StartDT(ctx)
 	c.syncState(l)
 	return err
 }
 
-// StopDT stops data transfer (STOPDT act) and waits for the confirmation.
-// The connection stays open and is supervised with test frames.
-func (c *Client) StopDT(ctx context.Context) error {
+// stopDT is StopDT bounded by ctx alone.
+func (c *Client) stopDT(ctx context.Context) error {
 	l, err := c.current()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
 	err = l.StopDT(ctx)
 	c.syncState(l)
 	return err
+}
+
+// startQuietly and stopQuietly are startDT and stopDT for a caller that
+// holds a lock the state handler may want, a redundancy group: the state
+// change is queued for the state handler, not delivered, and the caller
+// calls deliverNotices once it has let go of its lock.
+func (c *Client) startQuietly(ctx context.Context) error {
+	l, err := c.current()
+	if err != nil {
+		return err
+	}
+	err = l.StartDT(ctx)
+	c.sync(l, false)
+	return err
+}
+
+func (c *Client) stopQuietly(ctx context.Context) error {
+	l, err := c.current()
+	if err != nil {
+		return err
+	}
+	err = l.StopDT(ctx)
+	c.sync(l, false)
+	return err
+}
+
+// transfer reports what the client's link says of itself, which is ahead
+// of [Client.State] while the dispatcher is busy: whether the connection is
+// established, and whether data transfer is started on it.
+func (c *Client) transfer() (established, started bool) {
+	c.mu.Lock()
+	l := c.link
+	c.mu.Unlock()
+	if l == nil || l.Err() != nil {
+		return false, false
+	}
+	return true, l.Settled()
+}
+
+// drop closes the current connection without closing the client: with
+// [WithReconnect] it is established anew. A redundancy group uses it for a
+// connection whose data transfer state it can no longer be sure of.
+func (c *Client) drop() {
+	c.mu.Lock()
+	l := c.link
+	c.mu.Unlock()
+	if l != nil {
+		l.Drop()
+	}
+}
+
+// StopDT stops data transfer (STOPDT act) and waits for the confirmation.
+// The connection stays open and is supervised with test frames.
+func (c *Client) StopDT(ctx context.Context) error {
+	ctx, cancel := c.bound(ctx)
+	defer cancel()
+	return c.stopDT(ctx)
 }
 
 // TestLink sends a test frame (TESTFR act) and waits for the confirmation,
@@ -381,41 +570,125 @@ func (c *Client) remoteAddr() net.Addr {
 // handler may query the client.
 func (c *Client) setState(s iec104.State, err error) {
 	c.notifyMu.Lock()
-	defer c.notifyMu.Unlock()
 	c.mu.Lock()
-	same := c.state == s && err == nil
+	// A reconnect attempt that fails is reported each time, with its
+	// reason; a client that is disconnected is told so once.
+	same := c.state == s && (err == nil || s == iec104.StateDisconnected)
 	c.state = s
 	c.mu.Unlock()
-	if !same {
-		c.emit(s, err)
-	}
+	c.notify(!same, notice{s, err})
 }
 
 // syncState sets the state from the data transfer state of l, unless l is
 // no longer the current link. It reads the link rather than taking the
 // state as an argument because it is called both from the goroutine that
 // ran STARTDT or STOPDT and, later, from the link's own notification.
-func (c *Client) syncState(l *link.Link) {
+func (c *Client) syncState(l *link.Link) { c.sync(l, true) }
+
+// sync is syncState; without deliver the notice is only queued, see
+// startQuietly.
+func (c *Client) sync(l *link.Link, deliver bool) {
 	c.notifyMu.Lock()
-	defer c.notifyMu.Unlock()
 	c.mu.Lock()
-	if c.link != l {
+	// The confirmed state: "stopped" is reported when STOPDT is confirmed,
+	// not when it is sent, in step with the link's own notifications.
+	//
+	// A link that has ended is neither started nor stopped: its close
+	// notification says what became of the connection.
+	started := l.Settled()
+	if c.link != l || l.Err() != nil {
 		c.mu.Unlock()
+		c.notifyMu.Unlock()
 		return
 	}
 	s := iec104.StateStopped
-	if l.Started() {
+	if started {
 		s = iec104.StateStarted
 	}
 	same := c.state == s
 	c.state = s
 	c.mu.Unlock()
-	if !same {
-		c.emit(s, nil)
+	if !deliver {
+		if !same {
+			c.notices = append(c.notices, notice{s, nil})
+			c.queued++
+		}
+		c.notifyMu.Unlock()
+		return
 	}
+	c.notify(!same, notice{s, nil})
 }
 
-// emit logs and reports a state change. The caller holds notifyMu.
+// deliverNotices delivers what is queued for the state handler, unless
+// another goroutine is doing so. It never waits for one.
+func (c *Client) deliverNotices() {
+	c.notifyMu.Lock()
+	if c.notifying {
+		c.notifyMu.Unlock()
+		return
+	}
+	c.notify(false, notice{})
+}
+
+// notify queues n, when add is set, and makes sure the queue is delivered.
+// The caller holds notifyMu; notify releases it.
+//
+// Notices are delivered one at a time and in the order they were queued, by
+// the first goroutine that finds nobody delivering. A caller that finds
+// another goroutine delivering waits until its own notice has been
+// delivered, so that for example StartDT returns after "started" has been
+// reported. Two callers cannot wait: the goroutine that is delivering (the
+// state handler called back into the client) and the dispatcher of the
+// link (which must stay free to deliver what the handler may be waiting
+// for). Their notices are delivered behind them.
+func (c *Client) notify(add bool, n notice) {
+	if add {
+		c.notices = append(c.notices, n)
+		c.queued++
+	}
+	mine := c.queued
+	if c.notifying {
+		if c.notifier.Load() != goroutineID() && !c.onDispatcher() {
+			for c.delivered < mine {
+				c.idle.Wait()
+			}
+		}
+		c.notifyMu.Unlock()
+		return
+	}
+	c.notifying = true
+	c.notifier.Store(goroutineID())
+	for len(c.notices) > 0 {
+		next := c.notices[0]
+		c.notices = c.notices[1:]
+		c.notifyMu.Unlock()
+		c.emit(next.state, next.err)
+		c.notifyMu.Lock()
+		c.delivered++
+		c.idle.Broadcast()
+	}
+	c.notifying = false
+	c.notifier.Store(0)
+	c.idle.Broadcast()
+	c.notifyMu.Unlock()
+}
+
+// onDispatcher reports whether the caller is the dispatcher of the client's
+// link. It must not take c.mu: notify holds notifyMu, and c.mu is taken
+// inside it elsewhere.
+func (c *Client) onDispatcher() bool {
+	l := c.dispatching.Load()
+	return l != nil && l.OnDispatcher()
+}
+
+// flushNotices returns when every queued notice has been delivered.
+func (c *Client) flushNotices() {
+	c.notifyMu.Lock()
+	// Delivers what is queued, or waits for the goroutine that does.
+	c.notify(false, notice{})
+}
+
+// emit logs and reports a state change. One call at a time: see notify.
 func (c *Client) emit(s iec104.State, err error) {
 	if err != nil {
 		c.log.Info("connection state", "state", s.String(), "error", err)
@@ -428,6 +701,21 @@ func (c *Client) emit(s iec104.State, err error) {
 	if f := c.opts.stateTap; f != nil {
 		f()
 	}
+}
+
+// goroutineID returns the id of the calling goroutine, from the header of
+// its stack trace: the runtime has no other way to ask. It is only used to
+// recognise a call made from inside one of the client's own callbacks.
+func goroutineID() uint64 {
+	var buf [64]byte
+	b := buf[:runtime.Stack(buf[:], false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	if i := bytes.IndexByte(b, ' '); i > 0 {
+		if id, err := strconv.ParseUint(string(b[:i]), 10, 64); err == nil {
+			return id
+		}
+	}
+	return 0
 }
 
 func (c *Client) onLinkClose(l *link.Link, remote net.Addr, err error) {
@@ -460,6 +748,9 @@ func (c *Client) onLinkClose(l *link.Link, remote net.Addr, err error) {
 	for _, x := range pending {
 		x.fail(err)
 	}
+	// The link is no longer the current one and its loss is not reported
+	// yet: Close must not take this for "nothing left to wait for".
+	c.at("link-detached")
 	switch {
 	case dialing:
 		// connect notices the missing link and reports the failure.
@@ -489,7 +780,7 @@ func (c *Client) onASDU(remote net.Addr, raw []byte) {
 		}
 	}
 	c.mu.Unlock()
-	if h := c.opts.handler; h != nil {
+	if h := c.opts.handler; h != nil && !c.quiet.Load() {
 		h.HandleASDU(a)
 	}
 }

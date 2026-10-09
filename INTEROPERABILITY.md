@@ -18,7 +18,7 @@ behaviour is the application's.
 | Transport | TCP, IPv4 and IPv6 |
 | Port | 2404 by default, any |
 | TLS (IEC 62351-3) | yes, standard `crypto/tls`, default port 19998 |
-| IEC 62351-5 application-layer authentication | no |
+| IEC 62351-5 application-layer security (IEC TS 60870-5-7) | no: the types and causes are named and carried as raw payload; the procedures are not implemented. See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5) |
 | Redundant connections (redundancy groups) | yes, both roles. See [Redundancy](#redundancy) |
 
 ## Application layer framing
@@ -188,7 +188,9 @@ The test bit and the P/N bit are exposed as `ASDU.Test` and `ASDU.Negative`.
 | Reset process | `ResetProcess` | app, via `Mux` |
 | Parameter loading and activation | `Send` | app, via `Mux` |
 | File transfer, monitor direction (download) | `GetFile` | `FileServer`, via `Mux` |
-| File transfer, control direction (upload), directory, deletion | app: typed ASDUs with `Send` | app: typed ASDUs via `Mux` |
+| File transfer, control direction (upload) | `PutFile` | `FileServer` with a `FileSink`, via `Mux` |
+| File directory | `ListFiles` | `FileServer.Directory`, via `Mux` |
+| File deletion, spontaneous directory, query log | app: typed ASDUs with `Send` | app: typed ASDUs via `Mux` |
 | Rejecting unknown type / cause / common address | reported as `NegativeError` | yes: `Mux` and `WithCommonAddrs` |
 | Rejecting unknown information object address | reported as `NegativeError` | app: `Session.Reject(req, asdu.CauseUnknownIOA)` |
 
@@ -250,6 +252,11 @@ File download is verified in both roles: `GetFile` fetches the files of the
 lib60870-C station with the content its fixture defines, and the lib60870-C
 and j60870 clients download from `FileServer`, whose answers they cannot
 tell, ASDU by ASDU, from those of the lib60870-C file server.
+
+File upload and the directory are verified by this repository's own tests
+only (client against server, and each against a scripted peer). The pinned
+reference images have no operation for them: lib60870-C can receive a file
+but has no directory, and the other two stacks have neither.
 
 It has **not** been run against certified test equipment or field devices.
 Interoperability reports are welcome.

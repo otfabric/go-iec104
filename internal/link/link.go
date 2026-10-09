@@ -14,11 +14,14 @@ package link
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,8 +67,27 @@ type Config struct {
 
 	// OnASDU receives the payload of every I frame, in order.
 	OnASDU func(raw []byte)
+	// Drain makes a closed link deliver the ASDUs it had received, and
+	// acknowledged to the peer, before it ends. Without it they are
+	// discarded.
+	Drain bool
+	// OnTransfer is called on the protocol goroutine, at the moment data
+	// transfer starts or stops: before the confirmation is written, and in
+	// step with the frames, which the other callbacks, delivered later by
+	// the dispatcher, are not. epoch is the started period that begins or
+	// ends. A link that ends while started reports the stop here as well.
+	// It must not block and must not call into the link.
+	OnTransfer func(l *Link, started bool, epoch uint64)
+	// OnOpen is the first callback: it runs on the dispatcher before
+	// anything the peer sent is delivered.
+	OnOpen func()
 	// OnState is called when data transfer starts or stops.
 	OnState func(started bool)
+	// OnStopped is called after OnState(false) with the number of the
+	// started period that ended (see [Link.Epoch]). Like every callback it
+	// runs in the order of the protocol: after the ASDUs received in that
+	// period, before anything of the next.
+	OnStopped func(epoch uint64)
 	// OnClose is called exactly once, after every other callback returned.
 	// err is iec104.ErrClosed when the local application closed the link.
 	OnClose func(err error)
@@ -83,6 +105,9 @@ const (
 type sendReq struct {
 	asdu  []byte
 	acked func()
+	// epoch, when not nil, receives the started period the frame is sent
+	// in, on the protocol goroutine and before the frame is written.
+	epoch *atomic.Uint64
 	done  chan error
 }
 
@@ -119,6 +144,7 @@ type event struct {
 	kind    eventKind
 	data    []byte
 	started bool
+	epoch   uint64 // of a state event: the started period it begins or ends
 	err     error
 }
 
@@ -132,6 +158,16 @@ type Link struct {
 	frameCh chan readResult
 	closeCh chan struct{}
 	done    chan struct{}
+	// dispatched is closed when the dispatcher has delivered the last
+	// callback; dispatcher is the id of its goroutine.
+	dispatched chan struct{}
+	dispatcher atomic.Uint64
+	// epoch counts the started periods of the link.
+	epoch atomic.Uint64
+	// settled mirrors reported for readers outside the loop: the data
+	// transfer state as last confirmed, which unlike isStarted does not
+	// change while a STARTDT or STOPDT is on its way.
+	settled atomic.Bool
 	wake    chan struct{}
 
 	closeOnce sync.Once
@@ -163,17 +199,18 @@ type Link struct {
 // takes ownership of conn.
 func New(conn net.Conn, cfg Config) *Link {
 	l := &Link{
-		conn:    conn,
-		cfg:     cfg,
-		sendCh:  make(chan sendReq),
-		ctlCh:   make(chan ctlReq),
-		frameCh: make(chan readResult, 64),
-		closeCh: make(chan struct{}),
-		done:    make(chan struct{}),
-		wake:    make(chan struct{}, 1),
-		qsig:    make(chan struct{}, 1),
-		pending: make(map[apci.UFunction]*pendingU),
-		wbuf:    make([]byte, 0, apci.MaxFrameLength),
+		conn:       conn,
+		cfg:        cfg,
+		sendCh:     make(chan sendReq),
+		ctlCh:      make(chan ctlReq),
+		frameCh:    make(chan readResult, 64),
+		closeCh:    make(chan struct{}),
+		done:       make(chan struct{}),
+		dispatched: make(chan struct{}),
+		wake:       make(chan struct{}, 1),
+		qsig:       make(chan struct{}, 1),
+		pending:    make(map[apci.UFunction]*pendingU),
+		wbuf:       make([]byte, 0, apci.MaxFrameLength),
 	}
 	l.idleAt = time.Now().Add(cfg.Params.T3)
 	go l.read()
@@ -201,16 +238,56 @@ func (l *Link) Err() error {
 	return l.err
 }
 
-// Close terminates the link and closes the connection. It is idempotent and
-// safe to call from a callback.
+// Close terminates the link and closes the connection. It returns when the
+// link has told its owner everything it is going to: the callback in
+// progress, if any, has returned, OnClose has run, and no callback follows.
+// Called from a callback it cannot wait for that callback and returns as
+// soon as the link has terminated. Close is idempotent.
 func (l *Link) Close() error {
+	l.Shutdown()
+	<-l.done
+	if !l.OnDispatcher() {
+		<-l.dispatched
+	}
+	return nil
+}
+
+// Shutdown begins closing the link and returns at once. It is idempotent.
+func (l *Link) Shutdown() {
 	l.closeOnce.Do(func() {
 		close(l.closeCh)
 		// Unblocks a write the loop may be stuck in.
 		_ = l.conn.Close()
 	})
-	<-l.done
-	return nil
+}
+
+// Drop ends the link as a lost connection: unlike Close it is reported to
+// the owner as [iec104.ErrConnectionLost], which an owner that reconnects
+// answers by establishing the connection anew.
+func (l *Link) Drop() { _ = l.conn.Close() }
+
+// Dispatched is closed when the link has delivered its last callback.
+func (l *Link) Dispatched() <-chan struct{} { return l.dispatched }
+
+// OnDispatcher reports whether the caller runs on the goroutine that
+// delivers the callbacks of this link: that it is inside one of them.
+func (l *Link) OnDispatcher() bool { return goid() == l.dispatcher.Load() }
+
+// goid returns the id of the calling goroutine. The runtime offers no
+// supported way to ask; the header of a stack trace ("goroutine 12 [...")
+// has been stable since Go 1.0. It is only used to tell whether Close is
+// called from the dispatcher, where waiting for the dispatcher would never
+// end.
+func goid() uint64 {
+	var buf [64]byte
+	b := buf[:runtime.Stack(buf[:], false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	if i := bytes.IndexByte(b, ' '); i > 0 {
+		if id, err := strconv.ParseUint(string(b[:i]), 10, 64); err == nil {
+			return id
+		}
+	}
+	return 0
 }
 
 // Send transmits one ASDU in an I frame. It blocks while the send window is
@@ -225,6 +302,24 @@ func (l *Link) Send(ctx context.Context, asdu []byte) error {
 // the caller knows which frames may not have arrived. acked runs on the
 // protocol goroutine and must not block or call back into the link.
 func (l *Link) SendTracked(ctx context.Context, asdu []byte, acked func()) error {
+	return l.send(ctx, asdu, acked, nil)
+}
+
+// SendQueued is Send for an event that is kept until it is acknowledged:
+// acked as for SendTracked, epoch as for SendStamped.
+func (l *Link) SendQueued(ctx context.Context, asdu []byte, acked func(), epoch *atomic.Uint64) error {
+	return l.send(ctx, asdu, acked, epoch)
+}
+
+// SendStamped is Send for a request that waits for an answer: epoch
+// receives the started period (see [Link.Epoch]) the frame goes out in, at
+// the moment it does. The end of that period, reported by OnStopped, then
+// cannot be missed or mistaken for the end of another.
+func (l *Link) SendStamped(ctx context.Context, asdu []byte, epoch *atomic.Uint64) error {
+	return l.send(ctx, asdu, nil, epoch)
+}
+
+func (l *Link) send(ctx context.Context, asdu []byte, acked func(), epoch *atomic.Uint64) error {
 	if len(asdu) > apci.MaxASDULength {
 		return fmt.Errorf("%w: %d octets", apci.ErrASDUTooLong, len(asdu))
 	}
@@ -234,9 +329,14 @@ func (l *Link) SendTracked(ctx context.Context, asdu []byte, acked func()) error
 	default:
 	}
 	if !l.isStarted.Load() {
+		// A link that is terminating is not "stopped": say why it ended.
+		// shutdown records the reason before it clears the flag.
+		if err := l.Err(); err != nil {
+			return err
+		}
 		return iec104.ErrNotStarted
 	}
-	r := sendReq{asdu: asdu, acked: acked, done: make(chan error, 1)}
+	r := sendReq{asdu: asdu, acked: acked, epoch: epoch, done: make(chan error, 1)}
 	select {
 	case l.sendCh <- r:
 	case <-ctx.Done():
@@ -362,6 +462,11 @@ func (l *Link) shutdown(err error) {
 	l.err = err
 	l.errMu.Unlock()
 	l.isStarted.Store(false)
+	if l.reported && l.cfg.OnTransfer != nil {
+		// The period ends with the link; no "stopped" is queued for the
+		// dispatcher, which reports the end of the link instead.
+		l.cfg.OnTransfer(l, false, l.epoch.Load())
+	}
 	_ = l.conn.Close()
 	for _, p := range l.pending {
 		for _, w := range p.waiters {
@@ -436,13 +541,30 @@ func (l *Link) onTimer(now time.Time) error {
 func (l *Link) setState(s dtState) {
 	l.state = s
 	is := s == started
+	if is && !l.reported {
+		l.epoch.Add(1)
+	}
 	l.isStarted.Store(is)
 	// starting and stopping are transient: report only the settled states.
 	if (s == started || s == stopped) && l.reported != is {
 		l.reported = is
-		l.push(event{kind: evState, started: is})
+		l.settled.Store(is)
+		if l.cfg.OnTransfer != nil {
+			l.cfg.OnTransfer(l, is, l.epoch.Load())
+		}
+		l.push(event{kind: evState, started: is, epoch: l.epoch.Load()})
 	}
 }
+
+// Settled reports the data transfer state as last confirmed: true from the
+// STARTDT confirmation to the STOPDT confirmation. It is what the state
+// callbacks report, in step with them rather than ahead.
+func (l *Link) Settled() bool { return l.settled.Load() }
+
+// Epoch returns the number of the current started period, or of the last
+// one while data transfer is stopped: 0 before the first STARTDT, then 1, 2
+// and so on. An I frame belongs to the period it was sent in.
+func (l *Link) Epoch() uint64 { return l.epoch.Load() }
 
 func (l *Link) onSend(r sendReq) error {
 	if l.state != started {
@@ -453,6 +575,9 @@ func (l *Link) onSend(r sendReq) error {
 		// The I frame carries N(R) and so acknowledges what was received.
 		l.sentNR = l.vr
 		l.recvUnacked = 0
+	}
+	if r.epoch != nil {
+		r.epoch.Store(l.epoch.Load())
 	}
 	if err := l.write(apci.NewI(l.vs, l.sentNR, r.asdu)); err != nil {
 		r.done <- err
@@ -616,11 +741,10 @@ func (l *Link) acknowledge(nr uint16) error {
 // confirmStop sends the STOPDT con of a controlled station.
 func (l *Link) confirmStop() error {
 	l.stopPending = false
-	if err := l.write(apci.NewU(apci.StopDTCon)); err != nil {
-		return err
-	}
+	// The state changes before the confirmation is on the wire: a peer that
+	// has the confirmation must never find this side still started.
 	l.setState(stopped)
-	return nil
+	return l.write(apci.NewU(apci.StopDTCon))
 }
 
 func (l *Link) onU(fn apci.UFunction) error {
@@ -638,11 +762,16 @@ func (l *Link) onU(fn apci.UFunction) error {
 		}
 		if fn == apci.StartDTAct {
 			l.stopPending = false
-			if err := l.write(apci.NewU(apci.StartDTCon)); err != nil {
-				return err
-			}
+			resumed := l.state == stopping
+			// As for STOPDT: started before the peer can know it.
 			l.setState(started)
-			return nil
+			// A stop that was never confirmed has not ended the started
+			// period, so setState had nothing to report; what was refused
+			// in the meantime may be sent again, which the owner must know.
+			if resumed && l.cfg.OnTransfer != nil {
+				l.cfg.OnTransfer(l, true, l.epoch.Load())
+			}
+			return l.write(apci.NewU(apci.StartDTCon))
 		}
 		if l.recvUnacked > 0 {
 			if err := l.sendS(); err != nil {
@@ -694,6 +823,13 @@ func (l *Link) write(f apci.Frame) error {
 	}
 	_ = l.conn.SetWriteDeadline(time.Now().Add(l.cfg.Params.T1))
 	if _, err := l.conn.Write(b); err != nil {
+		select {
+		case <-l.closeCh:
+			// Close closed the connection under this write: the link was
+			// closed, it did not lose its connection.
+			return iec104.ErrClosed
+		default:
+		}
 		return fmt.Errorf("%w: %w", iec104.ErrConnectionLost, err)
 	}
 	if m := l.cfg.Metrics; m != nil {
@@ -750,15 +886,38 @@ func (l *Link) pop() event {
 }
 
 func (l *Link) dispatch() {
+	defer close(l.dispatched)
+	l.dispatcher.Store(goid())
+	if l.cfg.OnOpen != nil {
+		l.cfg.OnOpen()
+	}
+	// closing reports whether the owner has closed the link. What is still
+	// queued then is not delivered, received ASDUs excepted when the owner
+	// asked for them (Config.Drain): after Close the owner is told that the
+	// link ended, and nothing else.
+	closing := func() bool {
+		select {
+		case <-l.closeCh:
+			return true
+		default:
+			return false
+		}
+	}
 	for {
 		switch ev := l.pop(); ev.kind {
 		case evASDU:
-			if l.cfg.OnASDU != nil {
+			if l.cfg.OnASDU != nil && (l.cfg.Drain || !closing()) {
 				l.cfg.OnASDU(ev.data)
 			}
 		case evState:
+			if closing() {
+				continue
+			}
 			if l.cfg.OnState != nil {
 				l.cfg.OnState(ev.started)
+			}
+			if !ev.started && l.cfg.OnStopped != nil {
+				l.cfg.OnStopped(ev.epoch)
 			}
 		case evClose:
 			if l.cfg.OnClose != nil {

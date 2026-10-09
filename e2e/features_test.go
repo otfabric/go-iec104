@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -434,6 +435,22 @@ func TestGroupRequests(t *testing.T) {
 		f := l.fx.Files[0]
 		if got, err := g.GetFile(ctx, ca, f.IOA, f.Name); err != nil || !bytes.Equal(got, f.Content()) {
 			t.Errorf("%s: GetFile: %v", what, err)
+		}
+		// Deliver a file, find it in the directory, fetch it back.
+		up := station.FirstUploadIOA + 5
+		note := []byte("delivered over " + what)
+		if err := g.PutFile(ctx, ca, up, 2, note[:5], note[5:]); err != nil {
+			t.Errorf("%s: PutFile: %v", what, err)
+		}
+		dir, err := g.ListFiles(ctx, ca, 0)
+		if err != nil || len(dir) != len(l.fx.Files)+1 || dir[len(dir)-1].IOA != up || int(dir[len(dir)-1].Length) != len(note) {
+			t.Errorf("%s: ListFiles: %d entries, %v", what, len(dir), err)
+		}
+		if got, err := g.GetFile(ctx, ca, up, 2); err != nil || !bytes.Equal(got, note) {
+			t.Errorf("%s: fetching the delivered file: %q, %v", what, got, err)
+		}
+		if got, ok := l.st.Uploaded(up); !ok || !bytes.Equal(got, note) {
+			t.Errorf("%s: the file is not at the station the group is started on", what)
 		}
 		rec.reset()
 		if err := g.Send(ctx, asdu.New(asdu.CauseActivation, ca, asdu.ParameterActivation{IOA: 1})); err != nil {
@@ -917,6 +934,22 @@ func (c *blackholeConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+// Close on a dead link does not reach the other side either: no FIN gets
+// through. The station must find out by its own timers, so the connection
+// is only really closed well after they have expired.
+func (c *blackholeConn) Close() error {
+	if c.hole.silent.Load() {
+		c.dead.Store(true)
+	}
+	if !c.dead.Load() {
+		return c.Conn.Close()
+	}
+	// Ends a Read in progress, locally.
+	_ = c.SetReadDeadline(time.Now())
+	time.AfterFunc(3*time.Second, func() { _ = c.Conn.Close() })
+	return nil
+}
+
 func (c *blackholeConn) Read(p []byte) (int, error) {
 	for {
 		n, err := c.Conn.Read(p)
@@ -970,7 +1003,6 @@ func TestSilentLink(t *testing.T) {
 	}
 	testutil.Eventually(t, "the client reported the timeout", func() bool { return cliErr.has(iec104.ErrTimeout) })
 	testutil.Eventually(t, "the station reported the timeout", func() bool { return srvEnd.has(iec104.ErrTimeout) })
-	testutil.Eventually(t, "the station dropped the session", func() bool { return len(l.st.Server.Sessions()) == 0 })
 
 	// While the link is down every new connection dies the same way.
 	time.Sleep(300 * time.Millisecond)
@@ -983,6 +1015,11 @@ func TestSilentLink(t *testing.T) {
 		defer cancel()
 		_, err := c.Read(rctx, l.ca, 100)
 		return err == nil
+	})
+	// The sessions of the dead connections are gone: each ended by the
+	// station's own timers, as no close gets through a silent link.
+	testutil.Eventually(t, "the station kept the one session that is alive", func() bool {
+		return len(l.st.Server.Sessions()) == 1
 	})
 	if hole.dials.Load() < 2 {
 		t.Errorf("%d dials: the client did not reconnect", hole.dials.Load())
@@ -1051,4 +1088,103 @@ func TestConnectInTwoSteps(t *testing.T) {
 	if _, err := client.Dial(ctx, dead); !errors.Is(err, iec104.ErrConnectFailed) {
 		t.Errorf("Dial to a closed port: %v", err)
 	}
+}
+
+// Several controlling stations, each issuing every kind of request at once
+// on its connection, against one station: every request returns what it
+// returns alone. A request that takes an ASDU meant for another one, on
+// either side, shows up as a wrong result or a protocol violation.
+func TestEveryRequestAtOnce(t *testing.T) {
+	transports(t, func(t *testing.T, l *link) {
+		ctx := context.Background()
+		const clients, rounds = 4, 12
+		points := len(l.fx.Expected(false))
+		counters := len(l.fx.Expected(true))
+		small, large := l.fx.Files[0], l.fx.Files[len(l.fx.Files)-1]
+
+		var wg sync.WaitGroup
+		for i := 0; i < clients; i++ {
+			c := l.dial(t, client.WithRequestTimeout(20*time.Second))
+			upload := station.FirstUploadIOA + 500 + asdu.IOA(i)
+			data := bytes.Repeat([]byte{byte(i + 1), 0x33}, 1500+i)
+			kinds := map[string]func() error{
+				"Interrogate": func() error {
+					got, err := c.Interrogate(ctx, l.ca, asdu.QOIStation)
+					if err == nil && len(station.Observe(t, got)) != points {
+						err = fmt.Errorf("%d values, want %d", len(station.Observe(t, got)), points)
+					}
+					return err
+				},
+				"CounterInterrogate": func() error {
+					got, err := c.CounterInterrogate(ctx, l.ca, asdu.CounterGeneral, asdu.FreezeRead)
+					if err == nil && len(station.Observe(t, got)) != counters {
+						err = fmt.Errorf("%d counters, want %d", len(station.Observe(t, got)), counters)
+					}
+					return err
+				},
+				"Read": func() error {
+					a, err := c.Read(ctx, l.ca, 103)
+					if err == nil && (a.Type != asdu.M_BO_NA_1 || a.First().Address() != 103) {
+						err = fmt.Errorf("got %s", a)
+					}
+					return err
+				},
+				"Read counter": func() error {
+					a, err := c.Read(ctx, l.ca, 300)
+					if err == nil && a.Type != asdu.M_IT_NA_1 {
+						err = fmt.Errorf("got %s", a)
+					}
+					return err
+				},
+				"Command":     func() error { return c.Command(ctx, l.ca, asdu.SetpointScaled{IOA: 504, Value: 77}) },
+				"TestCommand": func() error { return c.TestCommand(ctx, l.ca) },
+				"GetFile": func() error {
+					got, err := c.GetFile(ctx, l.ca, large.IOA, large.Name)
+					if err == nil && !bytes.Equal(got, large.Content()) {
+						err = fmt.Errorf("%d octets that are not the file", len(got))
+					}
+					return err
+				},
+				"GetFile small": func() error {
+					got, err := c.GetFile(ctx, l.ca, small.IOA, small.Name)
+					if err == nil && !bytes.Equal(got, small.Content()) {
+						err = fmt.Errorf("%d octets that are not the file", len(got))
+					}
+					return err
+				},
+				"PutFile": func() error {
+					if err := c.PutFile(ctx, l.ca, upload, 1, data[:1000], data[1000:]); err != nil {
+						return err
+					}
+					if got, ok := l.st.Uploaded(upload); !ok || !bytes.Equal(got, data) {
+						return fmt.Errorf("the station holds %d octets that are not what was delivered", len(got))
+					}
+					return nil
+				},
+				"ListFiles": func() error {
+					dir, err := c.ListFiles(ctx, l.ca, 0)
+					if err != nil {
+						return err
+					}
+					if len(dir) < len(l.fx.Files) || dir[0].IOA != small.IOA {
+						return fmt.Errorf("directory of %d entries, first %d", len(dir), dir[0].IOA)
+					}
+					return nil
+				},
+			}
+			for name, run := range kinds {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for round := 0; round < rounds; round++ {
+						if err := run(); err != nil {
+							t.Errorf("client %d, %s, round %d: %v", i, name, round, err)
+							return
+						}
+					}
+				}()
+			}
+		}
+		wg.Wait()
+	})
 }

@@ -4,7 +4,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -37,20 +36,153 @@ import (
 // concurrent use.
 type Group struct {
 	clients        []*Client
-	dialing        []atomic.Bool
 	onSwitch       func(active *Client)
 	interval       time.Duration
+	maxDelay       time.Duration
 	connectTimeout time.Duration
 
 	active atomic.Pointer[Client]
 
-	mu      sync.Mutex // serializes reconcile and Switchover
+	// mu serializes reconcile and Switchover. It is held across STARTDT and
+	// STOPDT, which wait for the station, and never across a callback of
+	// the application: those may call the group.
+	mu sync.Mutex
+
+	// stateMu guards started and closed and is never held across a call
+	// that blocks, so that Close can be called from anywhere.
+	stateMu sync.Mutex
 	started bool
 	closed  bool
+	ctx     context.Context // ends when the group is closed
+	cancel  context.CancelFunc
 
-	kick    chan struct{}
-	closeCh chan struct{}
-	wg      sync.WaitGroup
+	// A connection that was never established, or whose first attempt
+	// failed, is dialed by the group, with the delays of [WithReconnect].
+	dialMu  sync.Mutex
+	dialing []bool
+	delay   []time.Duration
+	notYet  []time.Time
+
+	// The switch handler is called outside mu, one call at a time and in
+	// order, so that it may call back into the group.
+	switchMu   sync.Mutex
+	switchIdle *sync.Cond
+	switches   []*Client
+	switching  bool
+	switcher   atomic.Uint64 // goroutine calling the switch handler, 0 when idle
+
+	kick      chan struct{}
+	pending   chan struct{} // callbacks are due: see tell
+	closeCh   chan struct{}
+	closeDone chan struct{}
+	wg        sync.WaitGroup
+}
+
+// switched reports a change of the active connection to the switch handler.
+// The caller holds g.mu; the call itself happens later, see tellSwitches.
+func (g *Group) switched(next *Client) {
+	if g.onSwitch == nil {
+		return
+	}
+	g.switchMu.Lock()
+	g.switches = append(g.switches, next)
+	g.switchMu.Unlock()
+}
+
+// settle delivers what Switchover left for the application: the state
+// changes of the connections and the change of the active one. The caller
+// does not hold g.mu.
+//
+// The switch handler has been told when settle returns, also when another
+// goroutine was telling it. The state handlers are not waited for: one that
+// does not return holds up the notifications of its connection, and must
+// not hold up the group.
+func (g *Group) settle() {
+	// Not from inside a callback: the application would be called from
+	// within its own call. The group's own goroutine delivers instead.
+	if g.inCallback() {
+		g.later()
+		return
+	}
+	for _, c := range g.clients {
+		c.deliverNotices()
+	}
+	g.tellSwitches(true)
+}
+
+// later leaves what is queued for the application to the group's own
+// goroutine for that, see tell.
+func (g *Group) later() {
+	select {
+	case g.pending <- struct{}{}:
+	default:
+	}
+}
+
+// tell delivers what the supervisor left for the application. It has a
+// goroutine of its own: a callback that is slow, or that calls the group,
+// must not keep the supervisor from its work.
+func (g *Group) tell() {
+	defer g.wg.Done()
+	for {
+		select {
+		case <-g.closeCh:
+			return
+		case <-g.pending:
+		}
+		for _, c := range g.clients {
+			c.deliverNotices()
+		}
+		g.tellSwitches(false)
+	}
+}
+
+// tellSwitches calls the switch handler for what switched queued, one call
+// at a time and in order. When another goroutine is doing so it leaves the
+// calls to it, and with wait returns only when they have been made.
+func (g *Group) tellSwitches(wait bool) {
+	g.switchMu.Lock()
+	defer g.switchMu.Unlock()
+	for g.switching {
+		if !wait {
+			return
+		}
+		g.switchIdle.Wait()
+	}
+	g.switching = true
+	g.switcher.Store(goroutineID())
+	for len(g.switches) > 0 {
+		next := g.switches[0]
+		g.switches = g.switches[1:]
+		g.switchMu.Unlock()
+		g.onSwitch(next)
+		g.switchMu.Lock()
+	}
+	g.switching = false
+	g.switcher.Store(0)
+	g.switchIdle.Broadcast()
+}
+
+// wake makes the supervisor look at the group again.
+func (g *Group) wake() {
+	select {
+	case g.kick <- struct{}{}:
+	default:
+	}
+}
+
+// inCallback reports whether the caller is inside the switch handler or a
+// callback of one of the group's connections.
+func (g *Group) inCallback() bool {
+	if g.switcher.Load() == goroutineID() {
+		return true
+	}
+	for _, c := range g.clients {
+		if c.inCallback() {
+			return true
+		}
+	}
+	return false
 }
 
 // NewGroup returns a redundancy group over the given station addresses,
@@ -63,21 +195,22 @@ func NewGroup(addrs []string, opts ...Option) (*Group, error) {
 		return nil, fmt.Errorf("%w: a group needs at least one address", iec104.ErrInvalidOption)
 	}
 	g := &Group{
-		dialing: make([]atomic.Bool, len(addrs)),
-		kick:    make(chan struct{}, 1),
-		closeCh: make(chan struct{}),
+		dialing:   make([]bool, len(addrs)),
+		delay:     make([]time.Duration, len(addrs)),
+		notYet:    make([]time.Time, len(addrs)),
+		kick:      make(chan struct{}, 1),
+		pending:   make(chan struct{}, 1),
+		closeCh:   make(chan struct{}),
+		closeDone: make(chan struct{}),
 	}
-	wake := func() {
-		select {
-		case g.kick <- struct{}{}:
-		default:
-		}
-	}
+	g.switchIdle = sync.NewCond(&g.switchMu)
+	g.ctx, g.cancel = context.WithCancel(context.Background())
 	for _, addr := range addrs {
 		all := append([]Option{WithReconnect(Reconnect{})}, opts...)
-		all = append(all, WithAutoStart(false), func(o *options) { o.stateTap = wake })
+		all = append(all, WithAutoStart(false), func(o *options) { o.stateTap = g.wake })
 		c, err := New(addr, all...)
 		if err != nil {
+			g.cancel()
 			return nil, err
 		}
 		g.clients = append(g.clients, c)
@@ -85,6 +218,7 @@ func NewGroup(addrs []string, opts ...Option) (*Group, error) {
 	first := g.clients[0].opts
 	g.onSwitch = first.onSwitch
 	g.interval = first.reconnect.MinDelay
+	g.maxDelay = max(first.reconnect.MaxDelay, g.interval)
 	g.connectTimeout = first.params.T0
 	return g, nil
 }
@@ -100,6 +234,12 @@ func (g *Group) Clients() []*Client {
 // or nil when there is none.
 func (g *Group) Active() *Client { return g.active.Load() }
 
+func (g *Group) isClosed() bool {
+	g.stateMu.Lock()
+	defer g.stateMu.Unlock()
+	return g.closed
+}
+
 // Connect establishes the connections and returns as soon as one of them
 // has data transfer started. The others keep being established in the
 // background, as does every connection that is lost later.
@@ -108,17 +248,18 @@ func (g *Group) Active() *Client { return g.active.Load() }
 // that matches [iec104.ErrConnectFailed]; the group keeps trying in the
 // background until it is closed.
 func (g *Group) Connect(ctx context.Context) error {
-	g.mu.Lock()
+	g.stateMu.Lock()
 	switch {
 	case g.closed:
-		g.mu.Unlock()
+		g.stateMu.Unlock()
 		return iec104.ErrClosed
 	case !g.started:
 		g.started = true
-		g.wg.Add(1)
+		g.wg.Add(2)
 		go g.supervise()
+		go g.tell()
 	}
-	g.mu.Unlock()
+	g.stateMu.Unlock()
 
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
@@ -135,22 +276,61 @@ func (g *Group) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close closes every connection of the group. It is idempotent.
+// Close closes every connection of the group. When it returns the handlers,
+// the switch handler included, have been called for the last time, as for
+// [Client.Close]. Called from one of them it cannot wait for that call: it
+// returns at once and the close completes when the call has returned. Close
+// is idempotent; every caller outside a callback returns when the group is
+// closed.
 func (g *Group) Close() error {
-	g.mu.Lock()
-	if g.closed {
-		g.mu.Unlock()
+	g.stateMu.Lock()
+	first := !g.closed
+	if first {
+		g.closed = true
+		close(g.closeCh)
+		// Gives up a STARTDT or STOPDT the group is waiting for.
+		g.cancel()
+	}
+	g.stateMu.Unlock()
+
+	inside := g.inCallback()
+	if inside {
+		for _, c := range g.clients {
+			c.quiet.Store(true)
+		}
+	}
+	if first {
+		go func() {
+			g.wg.Wait()
+			var wg sync.WaitGroup
+			for _, c := range g.clients {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_ = c.Close()
+				}()
+			}
+			wg.Wait()
+			// Under mu: a Switchover that was under way has finished, and
+			// another one finds the group closed.
+			g.mu.Lock()
+			g.active.Store(nil)
+			g.mu.Unlock()
+			// The switch handler: not called again, and a call in progress
+			// has returned.
+			g.switchMu.Lock()
+			g.switches = nil
+			for g.switching {
+				g.switchIdle.Wait()
+			}
+			g.switchMu.Unlock()
+			close(g.closeDone)
+		}()
+	}
+	if inside {
 		return nil
 	}
-	g.closed = true
-	close(g.closeCh)
-	g.mu.Unlock()
-
-	g.wg.Wait()
-	for _, c := range g.clients {
-		_ = c.Close()
-	}
-	g.active.Store(nil)
+	<-g.closeDone
 	return nil
 }
 
@@ -160,6 +340,7 @@ func (g *Group) supervise() {
 	defer tick.Stop()
 	for {
 		g.reconcile()
+		g.later()
 		select {
 		case <-g.closeCh:
 			return
@@ -169,61 +350,128 @@ func (g *Group) supervise() {
 	}
 }
 
+// dial establishes connection i when it is disconnected and not being
+// dialed, and its delay after a failed attempt has passed.
+func (g *Group) dial(i int) {
+	c := g.clients[i]
+	if c.State() != iec104.StateDisconnected {
+		return
+	}
+	g.dialMu.Lock()
+	if g.dialing[i] || time.Now().Before(g.notYet[i]) {
+		g.dialMu.Unlock()
+		return
+	}
+	g.stateMu.Lock()
+	if g.closed {
+		g.stateMu.Unlock()
+		g.dialMu.Unlock()
+		return
+	}
+	g.wg.Add(1)
+	g.stateMu.Unlock()
+	g.dialing[i] = true
+	g.dialMu.Unlock()
+
+	go func() {
+		defer g.wg.Done()
+		ctx, cancel := context.WithTimeout(g.ctx, g.connectTimeout)
+		err := c.Connect(ctx) // the state change wakes the supervisor
+		cancel()
+		g.dialMu.Lock()
+		g.dialing[i] = false
+		if err != nil {
+			// As a client does for a connection it lost: wait, longer
+			// after every failure.
+			g.delay[i] = min(max(2*g.delay[i], g.interval), g.maxDelay)
+			g.notYet[i] = time.Now().Add(g.delay[i])
+		} else {
+			g.delay[i] = 0
+			g.notYet[i] = time.Time{}
+		}
+		g.dialMu.Unlock()
+	}()
+}
+
 // reconcile brings the group towards its invariant: every connection
 // established, exactly one of them started.
+//
+// It goes by what the links say of themselves and not by [Client.State],
+// which follows only when the application has been told: a Handler that is
+// slow on the active connection must not delay the switch to another when
+// that connection is lost.
 func (g *Group) reconcile() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.closed {
+	if g.isClosed() {
 		return
 	}
-	// A connection that was never established, or whose first attempt
-	// failed, does not reconnect by itself: dial it here.
-	for i, c := range g.clients {
-		if c.State() == iec104.StateDisconnected && g.dialing[i].CompareAndSwap(false, true) {
-			g.wg.Add(1)
-			go func() {
-				defer g.wg.Done()
-				defer g.dialing[i].Store(false)
-				ctx, cancel := context.WithTimeout(context.Background(), g.connectTimeout)
-				defer cancel()
-				go func() {
-					select {
-					case <-g.closeCh:
-						cancel()
-					case <-ctx.Done():
-					}
-				}()
-				_ = c.Connect(ctx) // the state change wakes the supervisor
-			}()
-		}
+	for i := range g.clients {
+		g.dial(i)
 	}
 
 	old := g.active.Load()
-	if old != nil && old.State() == iec104.StateStarted {
-		return
+	if old != nil {
+		if _, started := old.transfer(); started {
+			g.stopStrays(old)
+			return
+		}
 	}
 	g.active.Store(nil)
 	next := g.start(nil)
-	if next != old && g.onSwitch != nil {
-		g.onSwitch(next)
+	g.stopStrays(next)
+	if next != old {
+		g.switched(next)
 	}
 }
 
-// start starts data transfer on the first established connection other than
-// skip and makes it the active one. The caller holds g.mu.
-func (g *Group) start(skip *Client) *Client {
+// stopStrays stops data transfer on every connection other than active that
+// has it started: exactly one connection of a group is started. A STARTDT
+// the group gave up on may still be confirmed later; this is where that is
+// put right. The caller holds g.mu.
+func (g *Group) stopStrays(active *Client) {
 	for _, c := range g.clients {
-		if c == skip || c.State() != iec104.StateStopped {
+		if _, started := c.transfer(); c == active || !started {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.opts.params.T1)
-		err := c.StartDT(ctx)
+		ctx, cancel := context.WithTimeout(g.ctx, c.opts.params.T1)
+		err := c.stopQuietly(ctx)
+		cancel()
+		if err != nil {
+			c.drop()
+		}
+	}
+}
+
+// start makes a connection other than skip the active one: one that has
+// data transfer started already, or else the first established one, on
+// which it starts data transfer. The caller holds g.mu.
+func (g *Group) start(skip *Client) *Client {
+	for _, c := range g.clients {
+		if _, started := c.transfer(); c != skip && started {
+			g.active.Store(c)
+			return c
+		}
+	}
+	for _, c := range g.clients {
+		if established, started := c.transfer(); c == skip || !established || started {
+			continue
+		}
+		// Bounded by t1, the time the station has to confirm, and not by
+		// the request timeout.
+		ctx, cancel := context.WithTimeout(g.ctx, c.opts.params.T1)
+		err := c.startQuietly(ctx)
 		cancel()
 		if err == nil {
 			g.active.Store(c)
 			return c
 		}
+		if g.isClosed() {
+			return nil
+		}
+		// A STARTDT that was not confirmed may still be: a connection in
+		// that state is not a standby. Drop it; it is established anew.
+		c.drop()
 	}
 	return nil
 }
@@ -232,23 +480,33 @@ func (g *Group) start(skip *Client) *Client {
 // established standby: STOPDT on the one, STARTDT on the other. It fails
 // with [iec104.ErrNotConnected] when no standby is established, in which
 // case the active connection is left as it is.
+//
+// The switch handler has been told of the change when Switchover returns,
+// and so have the state handlers, unless one of them is still busy with an
+// earlier call. Switchover may be called from a handler; the handlers are
+// then told after that handler has returned.
 func (g *Group) Switchover(ctx context.Context) error {
+	defer g.settle()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.closed {
+	if g.isClosed() {
 		return iec104.ErrClosed
 	}
 	old := g.active.Load()
 	standby := false
 	for _, c := range g.clients {
-		standby = standby || (c != old && c.State() == iec104.StateStopped)
+		established, started := c.transfer()
+		standby = standby || (c != old && established && !started)
 	}
 	if !standby {
 		return fmt.Errorf("%w: no standby connection is established", iec104.ErrNotConnected)
 	}
 	if old != nil {
-		if err := old.StopDT(ctx); err != nil && !errors.Is(err, iec104.ErrNotConnected) {
-			return err
+		if err := old.stopQuietly(ctx); err != nil {
+			// A connection that is lost needs no STOPDT.
+			if established, _ := old.transfer(); established {
+				return err
+			}
 		}
 	}
 	g.active.Store(nil)
@@ -257,11 +515,16 @@ func (g *Group) Switchover(ctx context.Context) error {
 		// The standby went away in the meantime: fall back to any connection.
 		next = g.start(nil)
 	}
-	if next != old && g.onSwitch != nil {
-		g.onSwitch(next)
+	g.stopStrays(next)
+	if next != old {
+		g.switched(next)
 	}
-	if next == nil {
+	switch next {
+	case nil:
 		return fmt.Errorf("%w: no connection of the group could be started", iec104.ErrNotConnected)
+	case old:
+		// Data transfer is back where it was: nothing was switched over.
+		return fmt.Errorf("%w: the standby connection could not be started", iec104.ErrNotConnected)
 	}
 	return nil
 }
@@ -314,6 +577,25 @@ func (g *Group) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, n
 		return nil, err
 	}
 	return c.GetFile(ctx, ca, ioa, name)
+}
+
+// PutFile sends a file over the active connection. See [Client.PutFile].
+func (g *Group) PutFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, sections ...[]byte) error {
+	c, err := g.use()
+	if err != nil {
+		return err
+	}
+	return c.PutFile(ctx, ca, ioa, name, sections...)
+}
+
+// ListFiles calls the directory over the active connection. See
+// [Client.ListFiles].
+func (g *Group) ListFiles(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) ([]asdu.FileDirectoryEntry, error) {
+	c, err := g.use()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListFiles(ctx, ca, ioa)
 }
 
 // Read reads one information object over the active connection. See
