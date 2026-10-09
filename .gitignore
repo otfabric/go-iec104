@@ -1,0 +1,10 @@
+# Ignore the bin directory
+bin/
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore coverage files
+cover.*
+coverage.*
+

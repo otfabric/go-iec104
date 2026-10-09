@@ -1,0 +1,20 @@
+name: CI
+run-name: "CI (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ github.actor }}"
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: otfabric/.github/.github/workflows/go-ci.yml@v2
+    with:
+      codecov-name: go-iec104
+      go-versions: '["1.23", "1.24", "1.25", "1.26"]'
+    secrets: inherit
