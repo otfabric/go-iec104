@@ -191,6 +191,7 @@ func (c *Client) Command(ctx context.Context, ca asdu.CommonAddr, obj asdu.Infor
 func (c *Client) Deactivate(ctx context.Context, ca asdu.CommonAddr, obj asdu.InformationObject) error
 func (c *Client) TestCommand(ctx context.Context, ca asdu.CommonAddr) error
 func (c *Client) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier uint8) error
+func (c *Client) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) ([]byte, error)
 ```
 
 | Method | Sends | Returns when |
@@ -203,6 +204,7 @@ func (c *Client) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier
 | `Deactivate` | process command, deactivation | deactivation confirmation |
 | `TestCommand` | `C_TS_TA_1` activation | activation confirmation |
 | `ResetProcess` | `C_RP_NA_1` activation | activation confirmation |
+| `GetFile` | `F_SC_NA_1` select, then the calls and acknowledgements of the procedure | the file is acknowledged; result is its content |
 
 - `Command` accepts `SingleCommand`, `DoubleCommand`, `StepCommand`,
   `SetpointNormalized`, `SetpointScaled`, `SetpointFloat` and
@@ -210,6 +212,13 @@ func (c *Client) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier
 - Collected ASDUs are also delivered to the `Handler`.
 - Two requests with the same type, common address and object address cannot
   be pending at once (`ErrBusy`): their answers would be indistinguishable.
+- `GetFile` downloads a file (file transfer in monitor direction): select,
+  call, then section by section, checking the length and checksum of every
+  section and of the file and acknowledging them. A file the station refuses
+  is a `*iec104.NegativeError`; a length or checksum that does not match is
+  acknowledged negatively and returned as `ErrProtocol`. The request timeout
+  bounds each wait for the station, the context the whole transfer. It is
+  never retried.
 
 ### Retries
 
@@ -233,8 +242,9 @@ func (c *Client) Send(ctx context.Context, a *asdu.ASDU) error
 ```
 
 Transmits one ASDU and does not wait for an answer. Blocks while the send
-window is full. For parameters, file transfer, private types and anything
-the request methods do not cover.
+window is full. For parameters, private types, the file transfer services
+`GetFile` does not cover (directory, upload) and anything else the request
+methods leave out.
 
 ### Redundancy group
 
@@ -290,6 +300,9 @@ func (s *Server) Close() error
 func (s *Server) Addr() net.Addr
 func (s *Server) Sessions() []*Session
 func (s *Server) Broadcast(ctx context.Context, a *asdu.ASDU) (int, error)
+func (s *Server) Enqueue(a *asdu.ASDU) error
+func (s *Server) Pending(group string) int
+func (s *Server) Dropped(group string) uint64
 
 var ErrServerClosed error
 ```
@@ -299,6 +312,8 @@ var ErrServerClosed error
 - `Broadcast` sends to every session whose data transfer is started and
   returns how many it reached; per-session errors are joined.
 - A nil handler rejects everything with "unknown type identification".
+- `Enqueue` queues an event for every redundancy group and never blocks; see
+  [Redundancy groups and the event queue](#redundancy-groups-and-the-event-queue).
 
 ### Options
 
@@ -307,6 +322,8 @@ var ErrServerClosed error
 | `WithParams(apci.Params)` | `apci.DefaultParams()` | `k`, `w`, `t1`..`t3` |
 | `WithASDUParams(asdu.Params)` | `asdu.IEC104` | ASDU layout and time zone of time tags |
 | `WithCommonAddrs(...asdu.CommonAddr)` | all | Stations served; others get "unknown common address" (broadcast always passes) |
+| `WithRedundancyGroups(...RedundancyGroup)` | one group `default` for every client | Which clients form a redundancy group; a client no group allows is turned away |
+| `WithEventQueue(int)` | 1024 | Events buffered per redundancy group; the oldest is dropped when full |
 | `WithMaxSessions(int)` | unlimited | Close connections beyond the limit on accept |
 | `WithAccept(func(net.Addr) bool)` | all | Filter connections before any exchange |
 | `WithStateHandler(func(*Session, iec104.State, error))` | none | Session accepted / started / stopped / ended |
@@ -335,9 +352,89 @@ activation or deactivation ("unknown cause of transmission"; `C_RD_NA_1`
 requires "request"). File transfer and private types reach their handler
 with any cause. `Handle(nil, t)` removes a registration.
 
+### File server
+
+```go
+type File struct{ Sections [][]byte }
+func NewFile(data []byte, sectionSize int) File
+func (f File) Len() int
+
+type FileSource interface {
+    OpenFile(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) (File, bool)
+}
+type FileSourceFunc func(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) (File, bool)
+
+type FileServer struct {
+    OnDone func(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, err error)
+}
+func NewFileServer(source FileSource) *FileServer
+func (f *FileServer) HandleASDU(s *Session, a *asdu.ASDU)
+
+var FileTypes []asdu.TypeID // F_SC_NA_1, F_AF_NA_1
+var ErrFileNotAcknowledged error
+```
+
+`FileServer` is a `Handler` that serves files to controlling stations: file
+transfer in monitor direction, the counterpart of `Client.GetFile`.
+
+```go
+mux.Handle(server.NewFileServer(source), server.FileTypes...)
+```
+
+| Controlling station | `FileServer` answers |
+|---------------------|----------------------|
+| `F_SC_NA_1` select file | `F_FR_NA_1` with the length, or the mirrored call with "unknown information object address" when the source has no such file |
+| `F_SC_NA_1` request file | `F_SR_NA_1` for section 1 |
+| `F_SC_NA_1` request section | the section in `F_SG_NA_1` segments of up to 236 octets, then `F_LS_NA_1` (last segment) with its checksum |
+| `F_AF_NA_1` section acknowledged | `F_SR_NA_1` for the next section, or `F_LS_NA_1` (last section) with the checksum of the file |
+| `F_AF_NA_1` file acknowledged | nothing: the transfer is complete |
+
+- `NewFile` splits content into sections; a `FileSource` may also return
+  sections of its own. A file has at most 254 sections and 16 MiB − 1.
+- A session can transfer several files at once, one per address. Selecting
+  an address again starts over. Transfers end with their session.
+- `OnDone` reports the end of a transfer: `nil` once the file was
+  acknowledged, `ErrFileNotAcknowledged` after a negative acknowledgement, a
+  deactivation or a new selection.
+- A call out of order is refused with "unknown information object address".
+  The directory, deletion and transfer in control direction (upload) are not
+  served: such a call is mirrored with the P/N bit set.
+
+### Redundancy groups and the event queue
+
+```go
+type RedundancyGroup struct {
+	Name  string
+	Allow []string // IP addresses or prefixes; empty: any client not claimed by an earlier group
+}
+```
+
+A redundancy group is the set of connections of one controlling station (or
+of several that back each other up). At most one of them receives events at
+a time: the one that started data transfer last.
+
+`Server.Enqueue(a)` appends the event to the queue of every group. Per group:
+
+- events are sent in order on the active connection, subject to its `k`
+  window;
+- an event stays in the queue until the controlling station acknowledges its
+  I frame;
+- with no started connection, events wait;
+- when the active connection stops or is lost, what it had not acknowledged
+  becomes pending again and is sent on the next active connection. A
+  controlling station can therefore see an event twice across a switchover,
+  and does not miss one;
+- when a connection starts data transfer while another one of the group is
+  active, it takes over;
+- a full queue drops its oldest event; `Dropped` counts them.
+
+`Pending(group)` is the number of events queued or awaiting acknowledgement.
+`Broadcast` and `Session.Send` bypass the queue.
+
 ### Session
 
 ```go
+func (s *Session) Group() string            // redundancy group
 func (s *Session) ID() uint64
 func (s *Session) RemoteAddr() net.Addr
 func (s *Session) LocalAddr() net.Addr
@@ -423,6 +520,7 @@ func (t TypeID) Supported() bool       // has an object model
 func (t TypeID) HasTimeTag() bool
 func (t TypeID) InControlDirection() bool
 func (t TypeID) IsProcessCommand() bool
+func (t TypeID) IsFileTransfer() bool
 func (t TypeID) IsPrivate() bool
 
 type Cause uint8       // CausePeriodic … CauseUnknownIOA
@@ -473,9 +571,25 @@ a `Time Timestamp` field.
 | `ParameterScaled` | `Value int16`, `Qualifier uint8` | 111 |
 | `ParameterFloat` | `Value float32`, `Qualifier uint8` | 112 |
 | `ParameterActivation` | `Qualifier uint8` | 113 |
+| `FileReady` | `Name uint16`, `Length uint32`, `Qualifier uint8` | 120 |
+| `SectionReady` | `Name uint16`, `Section uint8`, `Length uint32`, `Qualifier uint8` | 121 |
+| `FileCall` | `Name uint16`, `Section uint8`, `Qualifier uint8` | 122 |
+| `FileLastSegment` | `Name uint16`, `Section uint8`, `Qualifier uint8`, `Checksum uint8` | 123 |
+| `FileAck` | `Name uint16`, `Section uint8`, `Qualifier uint8` | 124 |
+| `FileSegment` | `Name uint16`, `Section uint8`, `Data []byte` | 125 |
+| `FileDirectoryEntry` | `Name uint16`, `Length uint32`, `Status uint8`, `Time` | 126 |
+| `FileQueryLog` | `Name uint16`, `Start`, `Stop Timestamp` | 127 |
 
 The set is closed: the interface has unexported methods. Consume objects
 with a type switch.
+
+File transfer notes: an `F_SG_NA_1` ASDU carries exactly one `FileSegment`
+of up to `MaxSegmentLength` (236) octets; a directory (`F_DR_TA_1`) is sent
+with `ASDU.Sequence` set; lengths are 24 bit (`MaxFileLength`). The
+qualifier constants are `FileSelect`…`SectionDeactivate` (SCQ),
+`LastFile…`/`LastSection…` (LSQ), `AckFile…`/`AckSection…` (AFQ),
+`FileNegative` (FRQ/SRQ) and `FileLastOfDirectory`, `FileIsDirectory`,
+`FileActive` (SOF).
 
 ### Information elements
 

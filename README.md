@@ -1,4 +1,4 @@
-# otfabric/go-iec104 - IEC 60870-5-104 Client and Server Library for Go
+# go-iec104 - IEC 60870-5-104 Client and Server Library for Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![Go Reference](https://pkg.go.dev/badge/github.com/otfabric/go-iec104.svg)](https://pkg.go.dev/github.com/otfabric/go-iec104)
@@ -19,43 +19,51 @@ The library provides:
   select-before-operate, test command, automatic reconnect
 - A **server** (controlled station): any number of sessions, routing by type
   identification, standard-conformant rejection of what the application does
-  not serve, spontaneous data to one or all control centres
+  not serve, redundancy groups with an event queue that keeps events until a
+  control centre has acknowledged them
 - The complete **APCI** protocol machine on both sides: I/S/U frames, 15-bit
   sequence numbers, the `k`/`w` flow-control windows and the `t0`..`t3` timers
-- An **ASDU** model and codec for 59 type identifications, independent of the
-  transport and reusable for IEC 60870-5-101
+- An **ASDU** model and codec for 67 type identifications, file transfer
+  included, independent of the transport and reusable for IEC 60870-5-101
+- **File transfer**: `Client.GetFile` downloads a file from a station and
+  `server.FileServer` serves files, with sections, segments, checksums and
+  acknowledgements handled by the library
 - What production use needs: `context.Context` on every call, automatic
   reconnect, retries for the requests that are safe to repeat, redundancy
   groups with failover, structured logging, metrics hooks and TLS
   (IEC 62351-3)
 - **Verified against third-party stacks**: every push runs the library, as
-  client and as server, against MZ Automation lib60870-C and OpenMUC j60870
+  client and as server, against MZ Automation lib60870-C, OpenMUC j60870 and
+  wendy512/iec104
 
 **Docs:** [API.md](API.md) (public API) · [ARCHITECTURE.md](ARCHITECTURE.md) (packages, goroutines, protocol machine) · [INTEROPERABILITY.md](INTEROPERABILITY.md) (what is implemented, clause by clause) · [ERRORS.md](ERRORS.md) (error semantics) · [OBSERVABILITY.md](OBSERVABILITY.md) (logging and metrics) · [SECURITY.md](SECURITY.md) · [RELEASE.md](RELEASE.md) (changelog)
 
 ## Table of contents
 
-- [go-iec104 vs lib60870 and j60870](#go-iec104-vs-lib60870-and-j60870)
-- [Install](#install)
-- [Project structure](#project-structure)
-- [Client quickstart](#client-quickstart)
-- [Server quickstart](#server-quickstart)
-- [Production features](#production-features)
-- [The ASDU model](#the-asdu-model)
-- [Protocol parameters](#protocol-parameters)
-- [Error semantics](#error-semantics)
-- [Examples](#examples)
-- [Development](#development)
-- [Interop tests](#interop-tests)
-- [Limitations](#limitations)
-- [License](#license)
+- [go-iec104 - IEC 60870-5-104 Client and Server Library for Go](#go-iec104---iec-60870-5-104-client-and-server-library-for-go)
+	- [Table of contents](#table-of-contents)
+	- [go-iec104 vs lib60870 and j60870](#go-iec104-vs-lib60870-and-j60870)
+	- [Install](#install)
+	- [Project structure](#project-structure)
+	- [Client quickstart](#client-quickstart)
+	- [Server quickstart](#server-quickstart)
+	- [Production features](#production-features)
+	- [The ASDU model](#the-asdu-model)
+	- [Protocol parameters](#protocol-parameters)
+	- [Error semantics](#error-semantics)
+	- [Examples](#examples)
+	- [Development](#development)
+	- [Interop tests](#interop-tests)
+	- [Limitations](#limitations)
+	- [License](#license)
 
 ## go-iec104 vs lib60870 and j60870
 
-go-iec104 is tested against two established implementations,
+go-iec104 is tested against three other implementations (see
+[Interop tests](#interop-tests)). This section compares it with the two
+most established of them,
 [MZ Automation lib60870-C](https://github.com/mz-automation/lib60870) and
-[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/) (see
-[Interop tests](#interop-tests)). Both are good libraries; this table shows
+[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/). Both are good libraries; this table shows
 where the three differ so you can pick the right one for your project.
 
 | Capability | otfabric/go-iec104 | lib60870-C | j60870 |
@@ -64,26 +72,36 @@ where the three differ so you can pick the right one for your project.
 | License | MIT | GPL-3.0 or commercial | GPL-3.0 |
 | IEC 60870-5-104 client (controlling station) | ✅ | ✅ | ✅ |
 | IEC 60870-5-104 server (controlled station) | ✅ | ✅ | ✅ |
-| IEC 60870-5-101 serial link layer | — (ASDU codec is 101-ready) | ✅ | — |
+| IEC 60870-5-101 serial link layer | — by design ¹ | ✅ | — |
 | Process information, commands, system types (1..40, 45..64, 70, 100..107) | ✅ | ✅ | ✅ |
 | Parameter types (110..113) | ✅ | ✅ | ✅ |
-| File transfer types (120..127) | raw payload | ✅ typed, with file server | ✅ typed |
+| File transfer types (120..127) | ✅ | ✅ | ✅ |
+| File transfer procedure, monitor direction (download) | ✅ client and server | ✅ server side | — |
+| File transfer procedure, control direction (upload), directory | — | ✅ server side | — |
 | Private types (128..255) | raw payload | raw payload | custom decoder |
 | Configurable `k`, `w`, `t0`..`t3` | ✅ | ✅ | ✅ |
 | TLS (IEC 62351-3) | ✅ `crypto/tls` | ✅ mbedTLS | via socket factory |
 | Blocking request methods (interrogate and collect, command and confirm) | ✅ | — callbacks | — callbacks |
 | Server-side routing with standard refusals (unknown type, cause, address) | ✅ `Mux` | partly built in | unknown type only |
 | Redundancy group, client side (failover, switchover) | ✅ `Group` | — | — |
-| Redundancy groups, server side | — | ✅ | — |
-| Server-side event queue for stopped or absent clients | — | ✅ | — |
+| Redundancy groups, server side | ✅ | ✅ | — |
+| Server-side event queue for stopped or absent clients | ✅ acknowledged delivery | ✅ | — |
 | Automatic reconnect with back-off | ✅ | — | — |
 | Automatic retries (read-only requests) | ✅ | — | — |
 | Cancellation and deadlines per call | ✅ `context.Context` | — | — timeouts only |
 | Structured logging | ✅ `log/slog` | — compile-time debug output | — (pluggable logger from 1.8.0) |
 | Metrics hooks | ✅ | — raw message callback | — |
-| Threadless / single-loop operation | — | ✅ | — |
+| Threadless / single-loop operation | — by design ² | ✅ | — |
 | Dependencies | none | none (mbedTLS optional) | none |
-| Cross-tested against other stacks in CI | ✅ against both | — not documented | — not documented |
+| Cross-tested against other stacks in CI | ✅ against both and a third | — not documented | — not documented |
+
+¹ IEC 60870-5-101 is a different companion standard with its own serial link
+layer (FT 1.2 framing, balanced and unbalanced procedures). It belongs in a
+module of its own, built on the `asdu` package of this one, which already
+takes the 101 field sizes.
+
+² A mode for C programs without threads. In Go the protocol machine runs on
+goroutines, and a single-threaded variant would add nothing.
 
 ✅ = available · — = not available or not documented. For lib60870-C v2.4.1
 and j60870 1.7.2, the versions go-iec104 is tested against, from their
@@ -96,9 +114,8 @@ library with no cgo and a permissive license, blocking calls with `context`
 control, reconnect, retries, client-side redundancy and observability built
 in.
 
-**Choose lib60870-C if** you need IEC 60870-5-101 over serial lines, file
-transfer, server-side redundancy groups and event queueing, or a C library
-for embedded targets; it is the most complete of the three.
+**Choose lib60870-C if** you need IEC 60870-5-101 over serial lines, a
+ready-made file server, or a C library for embedded targets.
 
 **Choose j60870 if** you are on the JVM and want a compact
 IEC 60870-5-104 library.
@@ -123,7 +140,9 @@ go-iec104/
 ├── client/                         controlling station
 ├── server/                         controlled station, sessions, Mux
 ├── internal/link/                  the protocol machine client and server share
-├── interop/                        tests against lib60870 and OpenMUC j60870
+├── internal/station/               a fixture-driven station for the tests below
+├── e2e/                            go-iec104 client against go-iec104 server
+├── interop/                        tests against lib60870, OpenMUC j60870, wendy512
 │                                   (build tag "interop", needs Docker)
 └── examples/client, examples/server
 ```
@@ -240,8 +259,24 @@ func main() {
 `Mux` answers a type without a handler with "unknown type identification" and
 an invalid cause of transmission with "unknown cause of transmission";
 `WithCommonAddrs` answers a foreign station address with "unknown common
-address". Spontaneous data goes out with `Session.Send` or, to every control
-centre whose data transfer is started, with `Server.Broadcast`.
+address".
+
+Events go out with `Server.Enqueue`: each redundancy group delivers them, in
+order, to its one started connection, keeps them while no control centre is
+connected and sends again what was not acknowledged when a connection is
+lost. `Session.Send` and `Server.Broadcast` send immediately and buffer
+nothing.
+
+```go
+srv, err := server.New(mux,
+	server.WithRedundancyGroups(
+		server.RedundancyGroup{Name: "main", Allow: []string{"10.0.0.0/24"}},
+		server.RedundancyGroup{Name: "backup"}), // everyone else
+	server.WithEventQueue(10000))
+
+_ = srv.Enqueue(asdu.New(asdu.CauseSpontaneous, 1,
+	asdu.SinglePoint{IOA: 1001, Value: true, Time: asdu.Now()}))
+```
 
 ## Production features
 
@@ -312,8 +347,8 @@ wire, err := a.Encode(asdu.IEC104)   // M_ME_TF_1
 back, err := asdu.Decode(wire, asdu.IEC104)
 ```
 
-Types without an object model (file transfer, the private range 128..255)
-are not an error: they travel as `ASDU.Raw` in both directions.
+Types without an object model (the private range 128..255) are not an error:
+they travel as `ASDU.Raw` in both directions.
 
 ## Protocol parameters
 
@@ -372,46 +407,86 @@ make bench      # codec benchmarks
 Tests need no hardware and no external process: client and server are tested
 against each other and against scripted peers over loopback TCP.
 
+The `e2e` package runs the library against itself, end to end, as part of
+`go test ./...`:
+
+- **Station scenarios** over TCP, TLS and with `k = w = 1`, against a station
+  that serves the fixture of the interop suite (the one the reference
+  clients are run against below): interrogation, counter interrogation and
+  read value by value, every command type with and without time tag,
+  select-before-operate, the refusals, file download, STARTDT/STOPDT, the
+  idle test, reconnect, concurrent sessions, the event queue and redundancy
+  on both sides.
+- **Wire matrix**: every one of the 67 type identifications, in the variants
+  the wire format distinguishes (time tags and their flags, SQ = 0 and
+  SQ = 1, full APDUs, the P/N and test bits, raw private types), sent
+  through both codecs and both protocol machines and compared field by
+  field; again with the IEC 101 field sizes and a time zone other than UTC;
+  and 40,000 frames each way to wrap the 15-bit sequence numbers.
+- **Everything around a connection**: state callbacks, logs and metrics of
+  both sides against each other; retries; session limit, accept filter and
+  redundancy groups by address; event queue overflow; broadcast; requests
+  that time out, are cancelled, collide or are pending when the station
+  shuts down; a handler that panics; mutual TLS; unsolicited data amid
+  requests; STOPDT in the middle of an event stream; a link that goes
+  silent without closing, so that both sides find out by their timers.
+
+Together they execute about 85% of the library's statements. The rest is
+what two correct peers never do to each other (malformed frames, sequence
+errors, protocol violations) and is covered by the scripted-peer tests of
+`internal/link` and the codec tests.
+
 ## Interop tests
 
-The `interop` package tests go-iec104 against two independent
-implementations, [MZ Automation lib60870-C](https://github.com/mz-automation/lib60870)
-and [OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/), packaged as
-container images by [otfabric/iec104-interop](https://github.com/otfabric/iec104-interop).
+The `interop` package tests go-iec104 against three independent
+implementations, [MZ Automation lib60870-C](https://github.com/mz-automation/lib60870),
+[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/) and
+[wendy512/iec104](https://github.com/wendy512/iec104) on its engine go-iecp5,
+packaged as container images by [otfabric/iec104-interop](https://github.com/otfabric/iec104-interop).
 
 ```sh
-make interop    # needs Docker; about two minutes
+make interop    # needs Docker; about four minutes
 ```
 
 | Direction | What is checked |
 |-----------|-----------------|
-| go-iec104 client → reference servers | Interrogation, counter interrogation and read return the fixture value by value; every command type with and without time tag, select-before-operate and deactivation; refusals (unknown type, cause, common address, object); STARTDT/STOPDT cycles; `k = w = 1`; the idle test in both directions; reconnect after a station restart; concurrent sessions; a redundancy group across the two stacks with failover and switchover |
-| reference clients → go-iec104 server | 30 scenarios per client. Each must have the outcome the standard prescribes, and the client's complete result (every ASDU, in order, field by field) must equal what it gets from the reference server of its own stack |
+| go-iec104 client → reference servers | File download with the content the fixture defines. Interrogation, counter interrogation and read return the fixture value by value; every command type with and without time tag, select-before-operate and deactivation; refusals (unknown type, cause, common address, object); STARTDT/STOPDT cycles; `k = w = 1`; the idle test in both directions; reconnect after a station restart; concurrent sessions; a redundancy group across two stacks with failover and switchover |
+| reference clients → go-iec104 server | 34 scenarios per client, file download among them. Each must have the outcome the standard prescribes, and the client's complete result (every ASDU, in order, field by field) must equal what it gets from the reference server of its own stack; an event queue delivered and acknowledged |
 
 The images are the only thing shared with iec104-interop; nothing of it is
 cloned or built here. Scenarios, expected values and assertions live in this
 repository.
 
 This version is qualified against
-[iec104-interop v0.1.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.1.0)
-(lib60870-C v2.4.1, j60870 1.7.2). The two images are pinned by digest in
-`interop/harness.go`, the Makefile and the Interop workflow, which runs on
-every push and pull request. To test against another build, set
-`IEC104_INTEROP_LIB60870_IMAGE` and `IEC104_INTEROP_OPENMUC_IMAGE`; to run
+[iec104-interop v0.2.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.2.0)
+(lib60870-C v2.4.1, j60870 1.7.2, wendy512/iec104 v1.0.4 on go-iecp5
+v1.2.6). The three images are pinned by digest in `interop/harness.go`, the
+Makefile and the Interop workflow, which runs on every push and pull
+request. To test against another build, set `IEC104_INTEROP_LIB60870_IMAGE`,
+`IEC104_INTEROP_OPENMUC_IMAGE` or `IEC104_INTEROP_WENDY512_IMAGE`; to run
 one stack only, `IEC104_INTEROP_ADAPTERS=lib60870`.
+
+The references do not all support the same. The suite asks each image what
+it declares (`print-capabilities`) and skips, rather than fails, what an
+image lacks:
+
+| | lib60870-C | j60870 | wendy512/iec104 |
+|---|:---:|:---:|:---:|
+| Everything in the table above except the rows below | ✅ | ✅ | ✅ |
+| Commands with time tag | ✅ | ✅ | — the stack drops them |
+| File download, reference as server (`GetFile`) | ✅ | — no file server | — |
+| File download, reference as client (`FileServer`) | ✅ | ✅ | — |
 
 ## Limitations
 
-- **File transfer** (`F_*`, types 120..127) has no object model and no
-  transfer state machine; the ASDUs pass through as raw payload.
-- **Redundancy groups** are managed on the client side (`client.Group`). A
-  server accepts several connections and each controls its own
-  STARTDT/STOPDT, but it does not group them or enforce one started
-  connection per group.
-- **No event buffering**: `Server.Broadcast` skips sessions in STOPDT.
-  Queueing events for a control centre that is away is left to the application.
-- **Verified against two third-party stacks**, lib60870-C and j60870 (see
-  [Interop tests](#interop-tests)); not against certified test equipment or
+- **File transfer** covers the download of a file from a station
+  (`Client.GetFile`, `server.FileServer`). The transfer in control direction
+  (upload), the directory and deletion have their types in the codec but no
+  procedure: they are left to the application.
+- **The event queue is in memory.** It survives a control centre that is
+  away, not a restart of the station.
+- **Verified against three third-party stacks**, lib60870-C, j60870 and
+  wendy512/iec104 (see [Interop tests](#interop-tests)); not against certified test equipment or
   field devices.
 
 Details in [INTEROPERABILITY.md](INTEROPERABILITY.md).

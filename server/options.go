@@ -21,6 +21,8 @@ type options struct {
 	logger      iec104.Logger
 	metrics     iec104.Metrics
 	maxSessions int
+	groups      []RedundancyGroup
+	queueSize   int
 	commonAddrs map[asdu.CommonAddr]struct{}
 	accept      func(remote net.Addr) bool
 	onState     func(s *Session, state iec104.State, err error)

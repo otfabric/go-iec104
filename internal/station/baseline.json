@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1.0",
+  "name": "baseline",
+  "description": "One controlled station with a point of every basic monitoring type and a command for each of them.",
+  "station": {
+    "commonAddress": 1
+  },
+  "points": [
+    { "ioa": 100, "type": "M_SP_NA_1", "value": true },
+    { "ioa": 101, "type": "M_DP_NA_1", "value": 2 },
+    { "ioa": 102, "type": "M_ST_NA_1", "value": 5 },
+    { "ioa": 103, "type": "M_BO_NA_1", "value": 2863311530 },
+    { "ioa": 110, "type": "M_SP_NA_1", "value": false, "quality": ["NT", "IV"] },
+    { "ioa": 111, "type": "M_SP_NA_1", "value": true, "quality": ["BL", "SB"] },
+    { "ioa": 200, "type": "M_ME_NA_1", "value": 16384 },
+    { "ioa": 201, "type": "M_ME_NB_1", "value": 1234 },
+    { "ioa": 202, "type": "M_ME_NC_1", "value": 230.5 },
+    { "ioa": 210, "type": "M_ME_NB_1", "value": -32768, "quality": ["OV"] },
+    { "ioa": 211, "type": "M_ME_NB_1", "value": -1 },
+    { "ioa": 300, "type": "M_IT_NA_1", "value": 123456, "sequence": 1 }
+  ],
+  "commands": [
+    { "ioa": 500, "type": "C_SC_NA_1", "target": 100, "reportCause": 11 },
+    { "ioa": 501, "type": "C_DC_NA_1", "target": 101, "reportCause": 3 },
+    { "ioa": 502, "type": "C_SE_NC_1", "target": 202, "reportCause": 11 },
+    { "ioa": 503, "type": "C_SE_NA_1", "target": 200, "reportCause": 11 },
+    { "ioa": 504, "type": "C_SE_NB_1", "target": 201, "reportCause": 11 },
+    { "ioa": 505, "type": "C_RC_NA_1", "target": 102, "reportCause": 11 },
+    { "ioa": 510, "type": "C_SC_NA_1", "target": 100, "reportCause": 11, "selectRequired": true }
+  ],
+  "files": [
+    { "ioa": 30000, "name": 1, "size": 1000, "sectionSize": 1000 },
+    { "ioa": 30001, "name": 1, "size": 5000, "sectionSize": 2048 }
+  ]
+}

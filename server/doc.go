@@ -19,6 +19,12 @@
 //	if err != nil { ... }
 //	log.Fatal(srv.ListenAndServe(":2404"))
 //
-// Spontaneous data is sent with [Session.Send] or to every started session
-// with [Server.Broadcast]. All methods are safe for concurrent use.
+// A [FileServer] registered for [FileTypes] serves files to controlling
+// stations.
+//
+// Events are queued with [Server.Enqueue]: each redundancy group delivers
+// them in order to its one started connection and keeps them until the
+// controlling station has acknowledged them. [Session.Send] and
+// [Server.Broadcast] send immediately and buffer nothing. All methods are
+// safe for concurrent use.
 package server

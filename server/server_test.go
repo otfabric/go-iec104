@@ -154,12 +154,13 @@ func TestMux(t *testing.T) {
 		}
 	}
 	// File transfer types are passed through with whatever cause they carry.
-	if err := c.Send(ctx, &asdu.ASDU{Type: asdu.F_SC_NA_1, Cause: asdu.CauseFileTransfer, CommonAddr: 1,
-		Raw: []byte{1, 0, 0, 1, 0, 0, 1}, RawCount: 1}); err != nil {
+	if err := c.Send(ctx, asdu.New(asdu.CauseFileTransfer, 1, asdu.FileCall{IOA: 9, Name: 1, Qualifier: asdu.FileSelect})); err != nil {
 		t.Fatal(err)
 	}
-	if a := next(); a.Type != asdu.F_SC_NA_1 || a.Cause != asdu.CauseFileTransfer || len(a.Raw) != 7 {
-		t.Errorf("file transfer echo: %s", a)
+	a := next()
+	if call, ok := a.First().(asdu.FileCall); !ok || a.Type != asdu.F_SC_NA_1 || a.Cause != asdu.CauseFileTransfer ||
+		call.Name != 1 || call.Qualifier != asdu.FileSelect {
+		t.Errorf("file transfer echo: %s %+v", a, a.First())
 	}
 
 	// Handlers can be replaced and removed at run time.

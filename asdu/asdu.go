@@ -41,8 +41,8 @@ type ASDU struct {
 	Objects []InformationObject
 
 	// Raw is the undecoded payload after the data unit identifier of an
-	// ASDU whose type is not [TypeID.Supported]: file transfer and private
-	// types. RawCount is the number of objects its variable structure
+	// ASDU whose type is not [TypeID.Supported]: the private range and
+	// types the standard reserves. RawCount is the number of objects its variable structure
 	// qualifier announces. On encode Raw is used when Objects is empty.
 	Raw      []byte
 	RawCount int
@@ -151,6 +151,9 @@ func (a *ASDU) AppendEncode(b []byte, p Params) ([]byte, error) {
 		}
 		maxIOA := IOA(1)<<(8*p.IOASize) - 1
 		loc := p.location()
+		if d.variable && (len(a.Objects) != 1 || a.Sequence) {
+			return b[:start], fmt.Errorf("%w: %s carries exactly one object and no sequence", ErrInvalidValue, a.Type)
+		}
 		for i, obj := range a.Objects {
 			if obj == nil || obj.kind() != d.kind {
 				return b[:start], fmt.Errorf("%w: object %d is %T under %s", ErrTypeMismatch, i, obj, a.Type)
@@ -176,6 +179,9 @@ func (a *ASDU) AppendEncode(b []byte, p Params) ([]byte, error) {
 				b = appendCP24(b, obj.stamp(), loc)
 			case tagCP56:
 				b = appendCP56(b, obj.stamp(), loc)
+			case tagCP56Pair:
+				q := obj.(FileQueryLog)
+				b = appendCP56(appendCP56(b, q.Start, loc), q.Stop, loc)
 			case tagNone:
 			}
 		}
@@ -229,6 +235,21 @@ func Decode(b []byte, p Params) (*ASDU, error) {
 		return a, nil
 	}
 
+	if d.variable {
+		// One object: address, fixed part, then as many octets as its
+		// length field says, which must be all that is left.
+		if a.Sequence || n != 1 || len(b) < p.IOASize+d.size || int(b[p.IOASize+d.size-1]) != len(b)-p.IOASize-d.size {
+			return nil, fmt.Errorf("%w: %s needs one object whose length field matches its %d payload octets",
+				ErrMalformed, a.Type, len(b))
+		}
+		var ioa IOA
+		for j := p.IOASize - 1; j >= 0; j-- {
+			ioa = ioa<<8 | IOA(b[j])
+		}
+		a.Objects = []InformationObject{d.dec(ioa, b[p.IOASize:], Timestamp{}, d)}
+		return a, nil
+	}
+
 	elem := d.size + d.tag.size()
 	want := n * (p.IOASize + elem)
 	if a.Sequence && n > 0 {
@@ -263,6 +284,11 @@ func Decode(b []byte, p Params) (*ASDU, error) {
 			ts = parseCP24(b[d.size:], loc)
 		case tagCP56:
 			ts = parseCP56(b[d.size:], loc)
+		case tagCP56Pair:
+			a.Objects = append(a.Objects, d.dec2(ioa, b[:d.size],
+				parseCP56(b[d.size:], loc), parseCP56(b[d.size+sizeCP56:], loc)))
+			b = b[elem:]
+			continue
 		case tagNone:
 		}
 		a.Objects = append(a.Objects, d.dec(ioa, b[:d.size], ts, d))

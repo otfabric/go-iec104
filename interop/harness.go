@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,27 +28,33 @@ type adapter struct {
 }
 
 // The reference images this version of go-iec104 is qualified against:
-// otfabric/iec104-interop v0.1.0 (lib60870-C v2.4.1, OpenMUC j60870 1.7.2),
-// pinned by digest so that a run is reproducible. Moving to another release
-// of iec104-interop means changing these two constants, and the Makefile and
-// the interop workflow follow.
+// otfabric/iec104-interop v0.2.0 (lib60870-C v2.4.1, OpenMUC j60870 1.7.2,
+// wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6), pinned by digest so that a run
+// is reproducible. Moving to another release of iec104-interop means changing
+// these constants, and the Makefile and the interop workflow follow.
 const (
-	interopRelease       = "v0.1.0"
-	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:a1fbb44a16da39d5aa3f387456d1f2931811556e5a4298797a6b4ea64c4ef248"
-	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:e1d15745d5e2005692f2844fb91c477826930b23fb772de14beb07da1942aa1a"
+	interopRelease       = "v0.2.0"
+	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72"
+	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174"
+	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03"
 )
 
 // adapters returns the reference implementations to test against. The image
 // of each can be overridden, for example to try a local build or a candidate:
 //
-//	IEC104_INTEROP_LIB60870_IMAGE, IEC104_INTEROP_OPENMUC_IMAGE
+//	IEC104_INTEROP_LIB60870_IMAGE, IEC104_INTEROP_OPENMUC_IMAGE,
+//	IEC104_INTEROP_WENDY512_IMAGE
 //
 // IEC104_INTEROP_ADAPTERS restricts the run to a comma-separated subset.
+//
+// The references do not all support the same: a test asks the image what it
+// declares (see [adapter.has]) and skips what it lacks.
 func adapters(t testing.TB) []adapter {
 	t.Helper()
 	all := []adapter{
 		{"lib60870", getenv("IEC104_INTEROP_LIB60870_IMAGE", defaultLib60870Image)},
 		{"openmuc", getenv("IEC104_INTEROP_OPENMUC_IMAGE", defaultOpenMUCImage)},
+		{"wendy512", getenv("IEC104_INTEROP_WENDY512_IMAGE", defaultWendy512Image)},
 	}
 	only := os.Getenv("IEC104_INTEROP_ADAPTERS")
 	if only == "" {
@@ -72,6 +79,80 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// capabilities is the document "print-capabilities" prints.
+type capabilities struct {
+	AdapterVersion string `json:"adapterVersion"`
+	Upstream       struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"upstream"`
+	Roles struct {
+		Server bool `json:"server"`
+		Client bool `json:"client"`
+	} `json:"roles"`
+	Features map[string]bool `json:"features"`
+}
+
+var capabilitiesOnce sync.Map // image -> *capabilities
+
+func (a adapter) capabilities(t testing.TB) *capabilities {
+	t.Helper()
+	if c, ok := capabilitiesOnce.Load(a.image); ok {
+		return c.(*capabilities)
+	}
+	out, stderr, err := docker("run", "--rm", a.image, "print-capabilities")
+	if err != nil {
+		t.Fatalf("print-capabilities of %s: %v\n%s", a.image, err, stderr)
+	}
+	caps := &capabilities{}
+	if err := json.Unmarshal([]byte(out), caps); err != nil {
+		t.Fatalf("capabilities of %s are not JSON: %v", a.image, err)
+	}
+	capabilitiesOnce.Store(a.image, caps)
+	return caps
+}
+
+// Features of the capability document that the tests ask for.
+const (
+	featTimeTaggedCommands = "timeTaggedCommands"
+	featDataTransferEvents = "dataTransferEvents"
+	featFileServer         = "fileServer"
+	featFileClient         = "fileClient"
+)
+
+// has reports whether the image declares a feature. A feature an image does
+// not mention is one it does not have, except dataTransferEvents: the
+// images of iec104-interop v0.1.0, released before that feature was named,
+// all report those events.
+func (a adapter) has(t testing.TB, feature string) bool {
+	t.Helper()
+	v, known := a.capabilities(t).Features[feature]
+	if !known && feature == featDataTransferEvents {
+		return true
+	}
+	return v
+}
+
+func (a adapter) hasAll(t testing.TB, features ...string) bool {
+	t.Helper()
+	for _, f := range features {
+		if !a.has(t, f) {
+			return false
+		}
+	}
+	return true
+}
+
+// need skips the test when the image does not declare every feature.
+func (a adapter) need(t testing.TB, features ...string) {
+	t.Helper()
+	for _, f := range features {
+		if !a.has(t, f) {
+			t.Skipf("%s does not declare %s", a.name, f)
+		}
+	}
 }
 
 var containerSeq atomic.Int64
@@ -345,29 +426,12 @@ func eventually(t testing.TB, timeout time.Duration, what string, cond func() bo
 // logReference records which reference build a test ran against.
 func logReference(t testing.TB, a adapter) {
 	t.Helper()
-	out, stderr, err := docker("run", "--rm", a.image, "print-capabilities")
-	if err != nil {
-		t.Fatalf("print-capabilities of %s: %v\n%s", a.image, err, stderr)
-	}
-	var caps struct {
-		AdapterVersion string `json:"adapterVersion"`
-		Upstream       struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-		} `json:"upstream"`
-		Roles struct {
-			Server bool `json:"server"`
-			Client bool `json:"client"`
-		} `json:"roles"`
-	}
-	if err := json.Unmarshal([]byte(out), &caps); err != nil {
-		t.Fatalf("capabilities of %s are not JSON: %v", a.image, err)
-	}
+	caps := a.capabilities(t)
 	if !caps.Roles.Server || !caps.Roles.Client {
 		t.Fatalf("%s does not provide both roles", a.image)
 	}
 	t.Logf("%s: iec104-interop %s, %s %s (%s)", a.name, caps.AdapterVersion, caps.Upstream.Name, caps.Upstream.Version, a.image)
-	if a.image == defaultLib60870Image || a.image == defaultOpenMUCImage {
+	if a.image == defaultLib60870Image || a.image == defaultOpenMUCImage || a.image == defaultWendy512Image {
 		if caps.AdapterVersion != interopRelease {
 			t.Errorf("%s is pinned as iec104-interop %s but reports %s", a.name, interopRelease, caps.AdapterVersion)
 		}

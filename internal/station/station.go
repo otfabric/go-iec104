@@ -1,10 +1,9 @@
-//go:build interop
-
 // SPDX-License-Identifier: MIT
 
-package interop
+package station
 
 import (
+	"crypto/tls"
 	"net"
 	"sync"
 	"testing"
@@ -15,10 +14,10 @@ import (
 	"github.com/otfabric/go-iec104/server"
 )
 
-// station is a go-iec104 server that behaves as the fixture prescribes: the
-// library under test in the role of the controlled station. It is written
-// against the public API only, the way an application would be.
-type station struct {
+// Station is a go-iec104 server that behaves as a fixture prescribes: the
+// library in the role of the controlled station. It is written against the
+// public API only, the way an application would be.
+type Station struct {
 	ca asdu.CommonAddr
 
 	mu       sync.Mutex
@@ -26,29 +25,40 @@ type station struct {
 	commands map[asdu.IOA]*stationCommand
 	clock    time.Time
 
-	srv  *server.Server
-	addr string
+	Server *server.Server
+	Addr   string // host:port; the station listens on all interfaces
 }
 
 type stationPoint struct {
-	fixturePoint
+	Point
 	quality asdu.Quality
 }
 
 type stationCommand struct {
-	fixtureCommand
+	Command
 	target   *stationPoint
 	selected bool
 }
 
-// startStation serves the fixture with go-iec104 on all interfaces, so that
+// Start serves the fixture with go-iec104 on all interfaces, so that
 // a client container can reach it through the Docker host gateway.
-func startStation(t testing.TB, fx *fixture, opts ...server.Option) *station {
+func Start(t testing.TB, fx *Fixture, opts ...server.Option) *Station {
 	t.Helper()
-	st := &station{ca: fx.Station.CommonAddr, commands: map[asdu.IOA]*stationCommand{}}
+	return start(t, fx, nil, opts...)
+}
+
+// StartTLS is Start with TLS on the listener.
+func StartTLS(t testing.TB, fx *Fixture, cfg *tls.Config, opts ...server.Option) *Station {
+	t.Helper()
+	return start(t, fx, cfg, opts...)
+}
+
+func start(t testing.TB, fx *Fixture, tlsConfig *tls.Config, opts ...server.Option) *Station {
+	t.Helper()
+	st := &Station{ca: fx.Station.CommonAddr, commands: map[asdu.IOA]*stationCommand{}}
 	byIOA := map[asdu.IOA]*stationPoint{}
 	for _, p := range fx.Points {
-		sp := &stationPoint{fixturePoint: p}
+		sp := &stationPoint{Point: p}
 		for _, f := range p.Quality {
 			switch f {
 			case "OV":
@@ -67,7 +77,7 @@ func startStation(t testing.TB, fx *fixture, opts ...server.Option) *station {
 		byIOA[p.IOA] = sp
 	}
 	for _, c := range fx.Commands {
-		st.commands[c.IOA] = &stationCommand{fixtureCommand: c, target: byIOA[c.Target]}
+		st.commands[c.IOA] = &stationCommand{Command: c, target: byIOA[c.Target]}
 	}
 
 	mux := server.NewMux()
@@ -77,6 +87,17 @@ func startStation(t testing.TB, fx *fixture, opts ...server.Option) *station {
 	mux.HandleFunc(asdu.C_CS_NA_1, st.clockSync)
 	mux.HandleFunc(asdu.C_TS_TA_1, func(s *server.Session, req *asdu.ASDU) { _ = s.Confirm(st.own(req)) })
 	mux.Handle(server.HandlerFunc(st.command), server.ProcessCommands...)
+	if len(fx.Files) > 0 {
+		mux.Handle(server.NewFileServer(server.FileSourceFunc(
+			func(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) (server.File, bool) {
+				for _, f := range fx.Files {
+					if f.IOA == ioa && f.Name == name && ca == st.ca {
+						return server.NewFile(f.Content(), f.SectionSize), true
+					}
+				}
+				return server.File{}, false
+			})), server.FileTypes...)
+	}
 
 	params := apci.DefaultParams()
 	srv, err := server.New(mux, append([]server.Option{
@@ -88,8 +109,11 @@ func startStation(t testing.TB, fx *fixture, opts ...server.Option) *station {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.srv = srv
-	st.addr = ln.Addr().String()
+	st.Server = srv
+	st.Addr = ln.Addr().String()
+	if tlsConfig != nil {
+		ln = tls.NewListener(ln, tlsConfig)
+	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return st
@@ -97,7 +121,7 @@ func startStation(t testing.TB, fx *fixture, opts ...server.Option) *station {
 
 // own returns req addressed to this station: a request to the broadcast
 // address is answered with the station's own address.
-func (st *station) own(req *asdu.ASDU) *asdu.ASDU {
+func (st *Station) own(req *asdu.ASDU) *asdu.ASDU {
 	if req.CommonAddr == st.ca {
 		return req
 	}
@@ -142,7 +166,7 @@ func (p *stationPoint) object(tag asdu.Timestamp) asdu.InformationObject {
 
 // report builds the answer to an interrogation: the selected points in
 // address order, consecutive points of one type sharing an ASDU.
-func (st *station) report(cause asdu.Cause, originator uint8, counters bool) []*asdu.ASDU {
+func (st *Station) report(cause asdu.Cause, originator uint8, counters bool) []*asdu.ASDU {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	var out []*asdu.ASDU
@@ -164,7 +188,7 @@ func (st *station) report(cause asdu.Cause, originator uint8, counters bool) []*
 	return out
 }
 
-func (st *station) interrogation(s *server.Session, req *asdu.ASDU) {
+func (st *Station) interrogation(s *server.Session, req *asdu.ASDU) {
 	req = st.own(req)
 	qoi := req.First().(asdu.Interrogation).Qualifier
 	if qoi != asdu.QOIStation {
@@ -178,7 +202,7 @@ func (st *station) interrogation(s *server.Session, req *asdu.ASDU) {
 	_ = s.Terminate(req)
 }
 
-func (st *station) counterInterrogation(s *server.Session, req *asdu.ASDU) {
+func (st *Station) counterInterrogation(s *server.Session, req *asdu.ASDU) {
 	req = st.own(req)
 	ci := req.First().(asdu.CounterInterrogation)
 	if ci.Request != asdu.CounterGeneral || ci.Freeze != asdu.FreezeRead {
@@ -192,7 +216,7 @@ func (st *station) counterInterrogation(s *server.Session, req *asdu.ASDU) {
 	_ = s.Terminate(req)
 }
 
-func (st *station) read(s *server.Session, req *asdu.ASDU) {
+func (st *Station) read(s *server.Session, req *asdu.ASDU) {
 	ioa := req.First().Address()
 	st.mu.Lock()
 	var obj asdu.InformationObject
@@ -211,14 +235,15 @@ func (st *station) read(s *server.Session, req *asdu.ASDU) {
 	_ = s.Send(s.Context(), a)
 }
 
-func (st *station) clockSync(s *server.Session, req *asdu.ASDU) {
+func (st *Station) clockSync(s *server.Session, req *asdu.ASDU) {
 	st.mu.Lock()
 	st.clock = req.First().(asdu.ClockSync).Time.Time
 	st.mu.Unlock()
 	_ = s.Confirm(st.own(req))
 }
 
-func (st *station) clockTime() time.Time {
+// ClockTime returns the time of the last clock synchronization.
+func (st *Station) ClockTime() time.Time {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.clock
@@ -244,7 +269,7 @@ func decodeCommand(obj asdu.InformationObject) (typ string, value any, sel, vali
 	return "", nil, false, false
 }
 
-func (st *station) command(s *server.Session, req *asdu.ASDU) {
+func (st *Station) command(s *server.Session, req *asdu.ASDU) {
 	req = st.own(req)
 	typ, value, sel, valid := decodeCommand(req.First())
 
@@ -297,4 +322,10 @@ func (st *station) command(s *server.Session, req *asdu.ASDU) {
 		_ = s.Send(s.Context(), report)
 		_ = s.Terminate(req)
 	}
+}
+
+// Loopback returns the address of the station on the loopback interface.
+func (st *Station) Loopback() string {
+	_, port, _ := net.SplitHostPort(st.Addr)
+	return net.JoinHostPort("127.0.0.1", port)
 }

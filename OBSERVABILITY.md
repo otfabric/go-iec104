@@ -94,12 +94,14 @@ identifiers. `NewSlogLogger` implements it through
 | Warn | `connection terminated` (`t1` or a protocol violation) | `error` |
 | Warn | `dropping undecodable ASDU` | `error` |
 | Warn | `connection rejected`, `accept failed` (server) | `remote`, `reason` or `error` |
+| Warn | `event queue full, dropping the oldest events` (server; once per overflow) | `group`, `size` |
+| Info | `redundancy group switched over` (server) | `group`, `session`, `previous` |
 | Warn | `ignoring unsolicited confirmation`, `ignoring U frame from controlled station` | `function` |
 | Error | `handler panic` (server) | `asdu`, `panic`, `stack` |
 
 Every entry carries `component` (`iec104.client` or `iec104.server`). Client
-entries carry `remote`; entries of a server session carry `session` and
-`remote`.
+entries carry `remote`; entries of a server session carry `session`,
+`remote` and `group`.
 
 Messages are constants: match on `msg` and the fields, not on formatted
 text. Log calls are made synchronously on the protocol path; keep
@@ -200,8 +202,10 @@ State is observable without logs or metrics:
 
 - `Client.State()` and `client.WithStateHandler` on the client
 - `Group.Active()`, `Group.Clients()` and `client.WithSwitchHandler` on a redundancy group
-- `Server.Sessions()`, `Session.Started()`, `Session.Err()` and
-  `server.WithStateHandler` on the server
+- `Server.Sessions()`, `Session.Started()`, `Session.Group()`,
+  `Session.Err()` and `server.WithStateHandler` on the server
+- `Server.Pending(group)` and `Server.Dropped(group)` for the event queues:
+  export them as gauges to see a control centre falling behind
 
 See [ERRORS.md](ERRORS.md#connection-fatal-errors) for the errors the state
 handlers receive.

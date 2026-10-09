@@ -20,6 +20,7 @@ import (
 // concurrent use.
 type Session struct {
 	srv    *Server
+	group  *group
 	log    *logx.Logger
 	id     uint64
 	conn   net.Conn
@@ -31,10 +32,11 @@ type Session struct {
 
 // newSession starts the protocol machine on conn. The callbacks wait for
 // ready, which start closes after the initial state notification.
-func newSession(srv *Server, conn net.Conn) *Session {
+func newSession(srv *Server, conn net.Conn, grp *group) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		srv:    srv,
+		group:  grp,
 		id:     srv.nextID.Add(1),
 		conn:   conn,
 		ready:  make(chan struct{}),
@@ -42,7 +44,7 @@ func newSession(srv *Server, conn net.Conn) *Session {
 		cancel: cancel,
 	}
 	o := &srv.opts
-	s.log = srv.log.With("session", s.id, "remote", conn.RemoteAddr().String())
+	s.log = srv.log.With("session", s.id, "remote", conn.RemoteAddr().String(), "group", grp.name)
 	s.link = link.New(conn, link.Config{
 		Role:    link.Controlled,
 		Params:  o.params,
@@ -55,8 +57,10 @@ func newSession(srv *Server, conn net.Conn) *Session {
 		OnState: func(started bool) {
 			<-s.ready
 			if started {
+				s.group.started(s)
 				s.notify(iec104.StateStarted, nil)
 			} else {
+				s.group.stopped(s)
 				s.notify(iec104.StateStopped, nil)
 			}
 		},
@@ -90,6 +94,7 @@ func (s *Session) onClose(err error) {
 	}
 	s.cancel()
 	s.srv.remove(s)
+	s.group.stopped(s)
 	if m := s.srv.opts.metrics; m != nil {
 		m.OnDisconnect(s.conn.RemoteAddr(), err)
 	}

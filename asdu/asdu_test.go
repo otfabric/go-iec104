@@ -136,6 +136,11 @@ func untagged() []InformationObject {
 		ParameterScaled{IOA: 22, Value: -100, Qualifier: ParameterHighLimit},
 		ParameterFloat{IOA: 23, Value: 1e6, Qualifier: ParameterSmoothing | ParameterNotInOperation},
 		ParameterActivation{IOA: 24, Qualifier: ActivateCyclic},
+		FileReady{IOA: 30, Name: 0x1234, Length: MaxFileLength, Qualifier: FileNegative | 1},
+		SectionReady{IOA: 31, Name: 1, Section: 2, Length: 4096, Qualifier: FileNegative},
+		FileCall{IOA: 32, Name: 1, Section: 2, Qualifier: SectionRequest},
+		FileLastSegment{IOA: 33, Name: 1, Section: 2, Qualifier: LastSectionNoDeactivation, Checksum: 0xA5},
+		FileAck{IOA: 34, Name: 1, Section: 2, Qualifier: AckSectionPositive},
 	}
 }
 
@@ -180,7 +185,29 @@ func TestRoundTripAllTypes(t *testing.T) {
 	run(plain)
 	run(samples(Timestamp{Time: ts, Invalid: true, Substituted: true, SummerTime: true}))
 	run(untagged())
-	run([]InformationObject{ClockSync{Time: At(ts)}})
+	run([]InformationObject{
+		ClockSync{Time: At(ts)},
+		FileDirectoryEntry{IOA: 40, Name: 7, Length: 1000, Status: FileLastOfDirectory | 3, Time: At(ts)},
+		FileQueryLog{IOA: 41, Name: 7, Start: At(ts.Add(-time.Hour)), Stop: At(ts)},
+	})
+
+	// A segment is the one type of variable size: one object per ASDU.
+	for _, data := range [][]byte{{}, {0xDE, 0xAD, 0xBE, 0xEF}, bytes.Repeat([]byte{0x5A}, MaxSegmentLength)} {
+		seg := New(CauseFileTransfer, 1, FileSegment{IOA: 50, Name: 7, Section: 1, Data: data})
+		wire, err := seg.Encode(IEC104)
+		if err != nil {
+			t.Fatalf("segment of %d octets: %v", len(data), err)
+		}
+		back, err := Decode(wire, IEC104)
+		if err != nil {
+			t.Fatalf("segment of %d octets: %v", len(data), err)
+		}
+		got := back.Objects[0].(FileSegment)
+		if got.IOA != 50 || got.Name != 7 || got.Section != 1 || !bytes.Equal(got.Data, data) || len(wire) != 6+3+4+len(data) {
+			t.Fatalf("segment round trip: %+v, %d octets on the wire", got, len(wire))
+		}
+	}
+	seen[F_SG_NA_1] = true
 
 	// The CP24Time2a variants and M_ME_ND_1 are never picked by TypeOf.
 	cp24 := Timestamp{Time: time.Date(1, 1, 1, 0, 59, 59, 999e6, time.UTC), Invalid: true}
@@ -280,6 +307,13 @@ func TestEncodeErrors(t *testing.T) {
 		{"nil ASDU", nil, IEC104, ErrInvalidValue},
 		{"too many objects", New(CauseSpontaneous, 1, many...), IEC104, ErrInvalidValue},
 		{"too long", New(CauseSpontaneous, 1, big...), IEC104, ErrTooLong},
+		{"file length", New(CauseFileTransfer, 1, FileReady{Length: MaxFileLength + 1}), IEC104, ErrInvalidValue},
+		{"section length", New(CauseFileTransfer, 1, SectionReady{Length: MaxFileLength + 1}), IEC104, ErrInvalidValue},
+		{"directory entry length", New(CauseFileTransfer, 1, FileDirectoryEntry{Length: MaxFileLength + 1}), IEC104, ErrInvalidValue},
+		{"segment longer than LOS", New(CauseFileTransfer, 1, FileSegment{Data: make([]byte, 256)}), Params{CauseSize: 2, CommonAddrSize: 2, IOASize: 3, MaxSize: 1000}, ErrInvalidValue},
+		{"segment longer than the ASDU", New(CauseFileTransfer, 1, FileSegment{Data: make([]byte, MaxSegmentLength+1)}), IEC104, ErrTooLong},
+		{"two segments", New(CauseFileTransfer, 1, FileSegment{}, FileSegment{IOA: 1}), IEC104, ErrInvalidValue},
+		{"segment as sequence", &ASDU{Type: F_SG_NA_1, Sequence: true, Objects: []InformationObject{FileSegment{}}}, IEC104, ErrInvalidValue},
 		{"type mismatch", &ASDU{Type: M_DP_NA_1, Objects: []InformationObject{SinglePoint{}}}, IEC104, ErrTypeMismatch},
 		{"nil object", &ASDU{Type: M_DP_NA_1, Objects: []InformationObject{nil}}, IEC104, ErrTypeMismatch},
 		{"unsupported type", &ASDU{Type: 200, Objects: []InformationObject{SinglePoint{}}}, IEC104, ErrUnsupportedType},
@@ -335,6 +369,10 @@ func TestDecodeErrors(t *testing.T) {
 		{"count mismatch", []byte{0x01, 0x02, 0x03, 0x00, 0x01, 0x00, 0x64, 0x00, 0x00, 0x01}, IEC104, ErrMalformed},
 		{"sequence mismatch", []byte{0x01, 0x82, 0x03, 0x00, 0x01, 0x00, 0x64, 0x00, 0x00, 0x01}, IEC104, ErrMalformed},
 		{"too long", make([]byte, 250), IEC104, ErrTooLong},
+		{"segment shorter than its length", []byte{0x7D, 0x01, 0x0D, 0x00, 0x01, 0x00, 1, 0, 0, 7, 0, 1, 5, 0xAA}, IEC104, ErrMalformed},
+		{"segment longer than its length", []byte{0x7D, 0x01, 0x0D, 0x00, 0x01, 0x00, 1, 0, 0, 7, 0, 1, 0, 0xAA}, IEC104, ErrMalformed},
+		{"segment without header", []byte{0x7D, 0x01, 0x0D, 0x00, 0x01, 0x00, 1, 0, 0, 7}, IEC104, ErrMalformed},
+		{"two segments", []byte{0x7D, 0x02, 0x0D, 0x00, 0x01, 0x00, 1, 0, 0, 7, 0, 1, 0}, IEC104, ErrMalformed},
 		{"sequence past the address range", []byte{0x01, 0x82, 0x03, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0x01, 0x00}, IEC104, ErrMalformed},
 		{"bad params", []byte{1, 2, 3}, Params{CauseSize: 3, CommonAddrSize: 2, IOASize: 3}, ErrInvalidParams},
 	}
@@ -348,16 +386,17 @@ func TestDecodeErrors(t *testing.T) {
 }
 
 func TestRawTypes(t *testing.T) {
-	wire := []byte{0x7D, 0x01, 0x0D, 0x00, 0x01, 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
+	// A type without an object model: the private range.
+	wire := []byte{0x8C, 0x01, 0x0D, 0x00, 0x01, 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
 	a, err := Decode(wire, IEC104)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Type != F_SG_NA_1 || a.Objects != nil || a.RawCount != 1 || a.Len() != 1 ||
+	if a.Type != 140 || a.Objects != nil || a.RawCount != 1 || a.Len() != 1 ||
 		!bytes.Equal(a.Raw, wire[6:]) || a.First() != nil {
 		t.Fatalf("raw decode: %+v", a)
 	}
-	if a.Type.Supported() || a.Type.String() != "F_SG_NA_1" || a.Type.Description() != "Segment" {
+	if a.Type.Supported() || a.Type.String() != "TypeID(140)" || a.Type.Description() != "" {
 		t.Errorf("type metadata: %s %q", a.Type, a.Type.Description())
 	}
 	wire[6] = 0 // Decode must not alias its input
@@ -379,6 +418,65 @@ func TestRawTypes(t *testing.T) {
 	b, err := (&ASDU{Type: 200, Cause: CauseSpontaneous, CommonAddr: 1}).Encode(IEC104)
 	if err != nil || !bytes.Equal(b, []byte{200, 0, 3, 0, 1, 0}) {
 		t.Errorf("empty private ASDU: % X, %v", b, err)
+	}
+}
+
+// Byte-level vectors of the file transfer types, built from the layouts of
+// IEC 60870-5-101 clause 7.3.6.
+func TestFileTransferVectors(t *testing.T) {
+	head := func(typ, vsq byte) []byte { return []byte{typ, vsq, 0x0D, 0x00, 0x01, 0x00} }
+	tests := []struct {
+		name string
+		asdu *ASDU
+		wire []byte
+	}{
+		{"file ready", New(CauseFileTransfer, 1, FileReady{IOA: 0x010203, Name: 0x1122, Length: 0x030201, Qualifier: 0x80}),
+			cat(head(120, 1), []byte{0x03, 0x02, 0x01, 0x22, 0x11, 0x01, 0x02, 0x03, 0x80})},
+		{"section ready", New(CauseFileTransfer, 1, SectionReady{IOA: 5, Name: 1, Section: 2, Length: 300, Qualifier: 0}),
+			cat(head(121, 1), []byte{5, 0, 0, 1, 0, 2, 0x2C, 0x01, 0x00, 0})},
+		{"call file", New(CauseFileTransfer, 1, FileCall{IOA: 5, Name: 1, Section: 0, Qualifier: FileRequest}),
+			cat(head(122, 1), []byte{5, 0, 0, 1, 0, 0, 2})},
+		{"last segment", New(CauseFileTransfer, 1, FileLastSegment{IOA: 5, Name: 1, Section: 2, Qualifier: LastSectionNoDeactivation, Checksum: 0x7F}),
+			cat(head(123, 1), []byte{5, 0, 0, 1, 0, 2, 3, 0x7F})},
+		{"ack section", New(CauseFileTransfer, 1, FileAck{IOA: 5, Name: 1, Section: 2, Qualifier: AckSectionPositive}),
+			cat(head(124, 1), []byte{5, 0, 0, 1, 0, 2, 3})},
+		{"segment", New(CauseFileTransfer, 1, FileSegment{IOA: 5, Name: 1, Section: 2, Data: []byte{0xCA, 0xFE}}),
+			cat(head(125, 1), []byte{5, 0, 0, 1, 0, 2, 2, 0xCA, 0xFE})},
+		{"directory", &ASDU{Type: F_DR_TA_1, Sequence: true, Cause: CauseFileTransfer, CommonAddr: 1,
+			Objects: []InformationObject{
+				FileDirectoryEntry{IOA: 100, Name: 1, Length: 10, Status: 0, Time: At(ts)},
+				FileDirectoryEntry{IOA: 101, Name: 2, Length: 20, Status: FileLastOfDirectory, Time: At(ts)},
+			}},
+			cat(head(126, 0x82), []byte{100, 0, 0}, []byte{1, 0, 10, 0, 0, 0}, tsCP56, []byte{2, 0, 20, 0, 0, 0x20}, tsCP56)},
+		{"query log", New(CauseFileTransfer, 1, FileQueryLog{IOA: 5, Name: 1, Start: At(ts), Stop: At(ts)}),
+			cat(head(127, 1), []byte{5, 0, 0, 1, 0}, tsCP56, tsCP56)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.asdu.Encode(IEC104)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if !bytes.Equal(got, tt.wire) {
+				t.Fatalf("wire = % X\nwant   % X", got, tt.wire)
+			}
+			back, err := Decode(tt.wire, IEC104)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if !reflect.DeepEqual(back, tt.asdu) {
+				t.Fatalf("decoded %+v\nwant    %+v", back, tt.asdu)
+			}
+			if !back.Type.IsFileTransfer() || !back.Type.Supported() || back.Type.InControlDirection() {
+				t.Errorf("metadata of %s", back.Type)
+			}
+		})
+	}
+	if M_SP_NA_1.IsFileTransfer() || TypeID(128).IsFileTransfer() {
+		t.Error("IsFileTransfer outside 120..127")
+	}
+	if F_SG_NA_1.String() != "F_SG_NA_1" || F_DR_TA_1.Description() != "Directory" || !F_DR_TA_1.HasTimeTag() {
+		t.Error("file transfer type names")
 	}
 }
 

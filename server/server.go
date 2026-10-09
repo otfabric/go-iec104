@@ -54,6 +54,9 @@ type Server struct {
 	listeners map[net.Listener]struct{}
 	sessions  map[*Session]struct{}
 	pending   map[net.Conn]struct{} // accepted, TLS handshake in progress
+
+	groups []*group
+	done   chan struct{} // closed by Close
 }
 
 // New returns a server that passes received ASDUs to h. A nil h rejects
@@ -75,14 +78,21 @@ func New(h Handler, opts ...Option) (*Server, error) {
 	if h == nil {
 		h = NewMux()
 	}
-	return &Server{
+	srv := &Server{
 		handler:   h,
 		opts:      o,
 		log:       logx.New(o.logger, "server"),
 		listeners: make(map[net.Listener]struct{}),
 		sessions:  make(map[*Session]struct{}),
 		pending:   make(map[net.Conn]struct{}),
-	}, nil
+		done:      make(chan struct{}),
+	}
+	groups, err := newGroups(srv, o.groups, o.queueSize)
+	if err != nil {
+		return nil, err
+	}
+	srv.groups = groups
+	return srv, nil
 }
 
 // ListenAndServe listens on the TCP address addr and serves connections
@@ -157,6 +167,18 @@ func (s *Server) accept(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	var grp *group
+	for _, g := range s.groups {
+		if g.allows(remote) {
+			grp = g
+			break
+		}
+	}
+	if grp == nil {
+		s.log.Warn("connection rejected", "remote", remote.String(), "reason", "no redundancy group allows the client")
+		_ = conn.Close()
+		return
+	}
 	if err := s.handshake(conn); err != nil {
 		s.log.Warn("connection rejected", "remote", remote.String(), "error", err)
 		_ = conn.Close()
@@ -175,7 +197,7 @@ func (s *Server) accept(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	sess := newSession(s, conn)
+	sess := newSession(s, conn, grp)
 	s.sessions[sess] = struct{}{}
 	s.mu.Unlock()
 	sess.start()
@@ -285,6 +307,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	close(s.done)
 	listeners := make([]net.Listener, 0, len(s.listeners))
 	for ln := range s.listeners {
 		listeners = append(listeners, ln)

@@ -25,6 +25,6 @@
 //	)
 //	b, err := a.Encode(asdu.IEC104)
 //
-// Type identifications this package has no model for (file transfer and the
-// private range) decode into [ASDU.Raw] and encode from it unchanged.
+// Type identifications this package has no model for (the private range and
+// reserved types) decode into [ASDU.Raw] and encode from it unchanged.
 package asdu

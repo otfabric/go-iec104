@@ -18,20 +18,25 @@ on:
       openmuc_image:
         description: "OpenMUC j60870 reference image (default: the pinned release)"
         required: false
+      wendy512_image:
+        description: "wendy512/iec104 reference image (default: the pinned release)"
+        required: false
 
 permissions:
   contents: read
   packages: read
 
 env:
-  # otfabric/iec104-interop v0.1.0: lib60870-C v2.4.1, OpenMUC j60870 1.7.2.
+  # otfabric/iec104-interop v0.2.0: lib60870-C v2.4.1, OpenMUC j60870 1.7.2,
+  # wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6.
   # Keep in step with the Makefile and interop/harness.go.
-  IEC104_INTEROP_LIB60870_IMAGE: ${{ inputs.lib60870_image || 'ghcr.io/otfabric/iec104-interop-lib60870@sha256:a1fbb44a16da39d5aa3f387456d1f2931811556e5a4298797a6b4ea64c4ef248' }}
-  IEC104_INTEROP_OPENMUC_IMAGE: ${{ inputs.openmuc_image || 'ghcr.io/otfabric/iec104-interop-openmuc@sha256:e1d15745d5e2005692f2844fb91c477826930b23fb772de14beb07da1942aa1a' }}
+  IEC104_INTEROP_LIB60870_IMAGE: ${{ inputs.lib60870_image || 'ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72' }}
+  IEC104_INTEROP_OPENMUC_IMAGE: ${{ inputs.openmuc_image || 'ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174' }}
+  IEC104_INTEROP_WENDY512_IMAGE: ${{ inputs.wendy512_image || 'ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03' }}
 
 jobs:
   interop:
-    name: lib60870 + OpenMUC, client and server
+    name: lib60870 + OpenMUC + wendy512, client and server
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -45,12 +50,19 @@ jobs:
 
       - name: Pull reference images
         run: |
-          docker pull "${IEC104_INTEROP_LIB60870_IMAGE}"
-          docker pull "${IEC104_INTEROP_OPENMUC_IMAGE}"
+          images=("${IEC104_INTEROP_LIB60870_IMAGE}" "${IEC104_INTEROP_OPENMUC_IMAGE}" "${IEC104_INTEROP_WENDY512_IMAGE}")
+          # GHCR is occasionally slow or rate limiting: try each pull a few times.
+          for image in "${images[@]}"; do
+            for attempt in 1 2 3 4 5; do
+              docker pull "${image}" && break
+              [[ "${attempt}" == 5 ]] && { echo "::error::cannot pull ${image}"; exit 1; }
+              sleep $((attempt * 15))
+            done
+          done
           {
             echo "| Reference | Image | Upstream |"
             echo "|---|---|---|"
-            for image in "${IEC104_INTEROP_LIB60870_IMAGE}" "${IEC104_INTEROP_OPENMUC_IMAGE}"; do
+            for image in "${images[@]}"; do
               docker run --rm "${image}" print-capabilities \
                 | jq -r --arg image "${image}" '"| \(.adapter) \(.adapterVersion) | `\($image)` | \(.upstream.name) \(.upstream.version) |"'
             done

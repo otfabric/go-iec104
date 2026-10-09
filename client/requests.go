@@ -251,11 +251,19 @@ func (c *Client) confirmedOnce(ctx context.Context, req *asdu.ASDU) error {
 		return err
 	}
 	defer c.end(x)
-	a, err := x.next(ctx)
-	if err != nil {
-		return err
+	for {
+		a, err := x.next(ctx)
+		if err != nil {
+			return err
+		}
+		// A termination is not an answer to this request: it concludes an
+		// earlier one for the same object, whose confirmation the caller
+		// already has.
+		if a.Cause == asdu.CauseActivationTerm {
+			continue
+		}
+		return rejected(a)
 	}
-	return rejected(a)
 }
 
 // Command sends a process command with cause "activation" and waits for the
@@ -313,6 +321,7 @@ func (c *Client) collectOnce(ctx context.Context, req *asdu.ASDU, cause asdu.Cau
 	defer c.end(x)
 
 	var data []*asdu.ASDU
+	confirmed := false
 	for {
 		a, err := x.next(ctx)
 		if err != nil {
@@ -325,9 +334,14 @@ func (c *Client) collectOnce(ctx context.Context, req *asdu.ASDU, cause asdu.Cau
 		if err := rejected(a); err != nil {
 			return data, err
 		}
-		if a.Cause == asdu.CauseActivationTerm {
+		switch {
+		case a.Cause != asdu.CauseActivationTerm:
+			confirmed = true
+		case confirmed:
 			return data, nil
 		}
+		// A termination before the confirmation concludes an earlier
+		// request of the same kind, not this one.
 	}
 }
 

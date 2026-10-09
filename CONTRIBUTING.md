@@ -38,7 +38,7 @@ make fuzz
 # Build the examples into ./bin
 make build
 
-# Run the interop suite against lib60870 and OpenMUC j60870 (needs Docker)
+# Run the interop suite against lib60870, OpenMUC j60870 and wendy512/iec104 (needs Docker)
 make interop
 ```
 

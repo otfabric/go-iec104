@@ -5,6 +5,7 @@
 package interop
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/client"
+	"github.com/otfabric/go-iec104/internal/station"
 )
 
 // recorder keeps every ASDU the client's handler receives.
@@ -145,7 +147,7 @@ func TestClientInterrogation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Interrogate: %v", err)
 		}
-		if got, want := observe(t, data), fx.expected(false); !sameObserved(got, want) {
+		if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
 			t.Errorf("interrogation:\n got  %v\n want %v", got, want)
 		}
 		for _, d := range data {
@@ -162,7 +164,7 @@ func TestClientInterrogation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Interrogate (broadcast): %v", err)
 		}
-		if got, want := observe(t, data), fx.expected(false); !sameObserved(got, want) {
+		if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
 			t.Errorf("broadcast interrogation:\n got  %v\n want %v", got, want)
 		}
 
@@ -170,11 +172,11 @@ func TestClientInterrogation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CounterInterrogate: %v", err)
 		}
-		if got, want := observe(t, totals), fx.expected(true); !sameObserved(got, want) {
+		if got, want := station.Observe(t, totals), fx.Expected(true); !station.SameObserved(got, want) {
 			t.Errorf("counter interrogation:\n got  %v\n want %v", got, want)
 		}
-		if seq := totals[0].Objects[0].(asdu.IntegratedTotal).Sequence; seq != fx.point(300).Sequence {
-			t.Errorf("counter sequence number %d, want %d", seq, fx.point(300).Sequence)
+		if seq := totals[0].Objects[0].(asdu.IntegratedTotal).Sequence; seq != fx.Point(300).Sequence {
+			t.Errorf("counter sequence number %d, want %d", seq, fx.Point(300).Sequence)
 		}
 
 		// Refusals: a group the station does not have, a counter request it
@@ -200,8 +202,8 @@ func TestClientRead(t *testing.T) {
 				t.Errorf("Read %d: %v", p.IOA, err)
 				continue
 			}
-			want := observed{p.IOA, p.Type, p.Value, joinFlags(p.Quality)}
-			if obs := observe(t, []*asdu.ASDU{got}); len(obs) != 1 || obs[0] != want || got.Cause != asdu.CauseRequest {
+			want := station.Observed{IOA: p.IOA, Type: p.Type, Value: p.Value, Quality: station.JoinFlags(p.Quality)}
+			if obs := station.Observe(t, []*asdu.ASDU{got}); len(obs) != 1 || obs[0] != want || got.Cause != asdu.CauseRequest {
 				t.Errorf("Read %d: got %v (%s), want %v", p.IOA, obs, got, want)
 			}
 		}
@@ -277,13 +279,16 @@ func TestClientCommands(t *testing.T) {
 				c := dial(t, srv.addr, client.WithHandler(rec))
 				ca := fx.Station.CommonAddr
 				sent := asdu.New(asdu.CauseActivation, ca, tt.command).Type
+				if sent.HasTimeTag() {
+					a.need(t, featTimeTaggedCommands)
+				}
 
 				if err := c.Command(ctx, ca, tt.command); err != nil {
 					t.Fatalf("Command: %v", err)
 				}
 				// The station reports the new state of the target, time tagged.
 				rep := rec.find(t, "report of the target", func(a *asdu.ASDU) bool { return a.Type == tt.report })
-				obs := observe(t, []*asdu.ASDU{rep})
+				obs := station.Observe(t, []*asdu.ASDU{rep})
 				if rep.Cause != tt.cause || len(obs) != 1 || obs[0].IOA != tt.target || obs[0].Value != tt.value {
 					t.Errorf("report %s %v, want cause %s, object %d = %v", rep, obs, tt.cause, tt.target, tt.value)
 				}
@@ -301,7 +306,7 @@ func TestClientCommands(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Read: %v", err)
 				}
-				if obs := observe(t, []*asdu.ASDU{got}); len(obs) != 1 || obs[0].Value != tt.value {
+				if obs := station.Observe(t, []*asdu.ASDU{got}); len(obs) != 1 || obs[0].Value != tt.value {
 					t.Errorf("read after command: %v, want %v", obs, tt.value)
 				}
 			})
@@ -384,6 +389,59 @@ func TestClientRefusals(t *testing.T) {
 	})
 }
 
+// TestClientFileTransfer: go-iec104 downloads the files of a reference
+// station and gets the content the fixture defines.
+func TestClientFileTransfer(t *testing.T) {
+	forEachServer(t, func(t *testing.T, a adapter, fx *fixture, srv *refServer) {
+		a.need(t, featFileServer)
+		if len(fx.Files) == 0 {
+			t.Fatalf("%s declares a file server but its fixture has no files", a.name)
+		}
+		ctx := context.Background()
+		rec := &recorder{}
+		c := dial(t, srv.addr, client.WithHandler(rec))
+		ca := fx.Station.CommonAddr
+
+		for _, f := range fx.Files {
+			rec.reset()
+			got, err := c.GetFile(ctx, ca, f.IOA, f.Name)
+			if err != nil {
+				t.Fatalf("GetFile %d: %v", f.IOA, err)
+			}
+			if !bytes.Equal(got, f.Content()) {
+				t.Errorf("file %d: got %d octets that are not the %d of the fixture", f.IOA, len(got), f.Size)
+			}
+			// The station announced the sections the fixture describes.
+			sections := 0
+			rec.mu.Lock()
+			for _, a := range rec.asdus {
+				if _, ok := a.First().(asdu.SectionReady); ok {
+					sections++
+				}
+			}
+			rec.mu.Unlock()
+			if want := (f.Size + f.SectionSize - 1) / f.SectionSize; sections != want {
+				t.Errorf("file %d: %d sections, want %d", f.IOA, sections, want)
+			}
+			// ...and saw its file acknowledged.
+			srv.waitEvent(t, "file-transfer", func(e event) bool {
+				return e["event"] == "file-transfer" && e["ioa"] == float64(f.IOA) && e["success"] == true
+			})
+		}
+
+		// A file the station does not have, and a known file under another name.
+		_, err := c.GetFile(ctx, ca, 39999, 1)
+		negative(t, err, asdu.CauseUnknownIOA)
+		_, err = c.GetFile(ctx, ca, fx.Files[0].IOA, fx.Files[0].Name+8)
+		negative(t, err, asdu.CauseUnknownIOA)
+
+		// The connection is as usable as before.
+		if _, err := c.Interrogate(ctx, ca, asdu.QOIStation); err != nil {
+			t.Errorf("Interrogate after the transfers: %v", err)
+		}
+	})
+}
+
 // TestClientDataTransfer: STOPDT and STARTDT against a reference station.
 func TestClientDataTransfer(t *testing.T) {
 	forEachServer(t, func(t *testing.T, a adapter, fx *fixture, srv *refServer) {
@@ -405,9 +463,11 @@ func TestClientDataTransfer(t *testing.T) {
 			if err := c.StartDT(ctx); err != nil {
 				t.Fatalf("StartDT: %v", err)
 			}
-			srv.waitEvent(t, "data-transfer-started", func(e event) bool { return e["event"] == "data-transfer-started" })
+			if a.has(t, featDataTransferEvents) {
+				srv.waitEvent(t, "data-transfer-started", func(e event) bool { return e["event"] == "data-transfer-started" })
+			}
 			data, err := c.Interrogate(ctx, ca, asdu.QOIStation)
-			if err != nil || !sameObserved(observe(t, data), fx.expected(false)) {
+			if err != nil || !station.SameObserved(station.Observe(t, data), fx.Expected(false)) {
 				t.Fatalf("Interrogate in round %d: %v", round, err)
 			}
 			if err := c.StopDT(ctx); err != nil {
@@ -441,7 +501,7 @@ func TestClientFlowControl(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Interrogate %d with k=1 w=1: %v", i, err)
 			}
-			if !sameObserved(observe(t, data), fx.expected(false)) {
+			if !station.SameObserved(station.Observe(t, data), fx.Expected(false)) {
 				t.Fatalf("Interrogate %d returned other data", i)
 			}
 		}
@@ -522,7 +582,7 @@ func TestClientReconnect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Interrogate after reconnect: %v", err)
 		}
-		if got, want := observe(t, data), fx.expected(false); !sameObserved(got, want) {
+		if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
 			t.Errorf("after reconnect:\n got  %v\n want %v", got, want)
 		}
 	})
@@ -546,7 +606,7 @@ func TestClientConcurrentSessions(t *testing.T) {
 						errs <- err
 						return
 					}
-					if !sameObserved(observe(t, data), fx.expected(false)) {
+					if !station.SameObserved(station.Observe(t, data), fx.Expected(false)) {
 						errs <- errors.New("interrogation returned other data")
 						return
 					}
@@ -565,7 +625,16 @@ func TestClientConcurrentSessions(t *testing.T) {
 // implementations. Exactly one connection is started; when its station goes
 // away the other takes over, and a switchover moves data transfer back.
 func TestClientGroup(t *testing.T) {
-	all := adapters(t)
+	// The test counts the stations' STARTDT and STOPDT events.
+	var all []adapter
+	for _, a := range adapters(t) {
+		if a.has(t, featDataTransferEvents) {
+			all = append(all, a)
+		}
+	}
+	if len(all) == 0 {
+		t.Skip("no reference reports data transfer events")
+	}
 	first, second := all[0], all[len(all)-1]
 	fx := loadFixture(t, first)
 	ca := fx.Station.CommonAddr
@@ -599,7 +668,7 @@ func TestClientGroup(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Interrogate %s: %v", what, err)
 		}
-		if got, want := observe(t, data), fx.expected(false); !sameObserved(got, want) {
+		if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
 			t.Errorf("%s:\n got  %v\n want %v", what, got, want)
 		}
 	}

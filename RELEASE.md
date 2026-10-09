@@ -1,5 +1,58 @@
 # go-iec104 Releases
 
+## v0.0.2
+
+**Date:** 2026-10-10
+**Previous release:** v0.0.1
+
+## Summary
+
+Fixes a client bug that could hide a refused command, and closes the gaps
+with lib60870-C and j60870: file transfer (typed ASDUs and the download
+procedure in both roles), server-side redundancy groups and a server-side
+event queue with acknowledged delivery. Qualified against three reference
+stacks instead of two. No breaking API change.
+
+**Upgrade if you use v0.0.1**: see "Fixed".
+
+## Changes
+
+### Added
+
+- **File transfer types** (`asdu`) — `F_FR_NA_1`..`F_SC_NB_1` (120..127) now decode into `FileReady`, `SectionReady`, `FileCall`, `FileLastSegment`, `FileAck`, `FileSegment`, `FileDirectoryEntry` and `FileQueryLog`, with the qualifier constants and `TypeID.IsFileTransfer`. 67 type identifications are modelled.
+- **File download** — `Client.GetFile` (and `Group.GetFile`) runs the file transfer procedure in monitor direction: select, call, sections, segments, with the length and checksum of every section and of the file checked and acknowledged. `server.FileServer`, registered on a `Mux` for `server.FileTypes`, serves the files of a `FileSource`; `server.NewFile` splits content into sections and `FileServer.OnDone` reports the end of each transfer.
+- **Server-side redundancy groups** — `server.WithRedundancyGroups` assigns connections to groups by client address; `Session.Group`. The connection of a group that started data transfer last is its active one.
+- **Event queue** — `Server.Enqueue` queues an event per redundancy group, delivers in order to the group's active connection, keeps events while no controlling station is connected and repeats what was not acknowledged when a connection stops or is lost. `server.WithEventQueue` sets the size (default 1024, oldest dropped when full); `Server.Pending` and `Server.Dropped` expose it.
+
+### Changed
+
+- **File transfer ASDUs are no longer raw.** Code that read `ASDU.Raw` for types 120..127 now finds typed `ASDU.Objects` instead. `ASDU.Raw` remains for the private range.
+- A server now turns away a client that no redundancy group allows. With the default configuration (one group for everyone) nothing changes.
+
+### Fixed
+
+- **A command or interrogation could take the activation termination of an earlier request for its own answer.** `Command`, `Deactivate`, `ClockSync`, `TestCommand` and `ResetProcess` returned success, without waiting for the confirmation, when the termination of a previous command to the same object arrived after the new one was sent: a refusal by the station went unnoticed. `Interrogate` and `CounterInterrogate` could likewise return early, with no data, on the termination of the previous run. A termination now only ends the request whose confirmation preceded it. Present in v0.0.1; found by the new end-to-end tests, where both sides answer within microseconds.
+
+### Verification
+
+- **End-to-end tests of the library against itself** (package `e2e`, part of `go test ./...`), 33 tests that execute about 85% of the library:
+  - the client against a go-iec104 station serving the interop fixture, over TCP, TLS and with `k = w = 1`: interrogation, counters and read value by value; all command types, select-before-operate and refusals; file download; STARTDT/STOPDT; the idle test in both directions; reconnect; concurrent sessions; the event queue; redundancy groups on the client and on the server;
+  - a wire matrix of all 67 type identifications in every variant, through both codecs and both protocol machines, also with the IEC 101 field sizes and a non-UTC time zone, and a 40,000-frame run across the sequence number wrap;
+  - state callbacks, logs and metrics of both sides checked against each other; retries; admission (session limit, accept filter, redundancy groups by address); event queue overflow; broadcast; timeouts, cancellation, `ErrBusy` and shutdown under a pending request; handler panics; mutual TLS; unsolicited data amid requests; STOPDT during an event stream; a silent link detected by t1 on both sides.
+
+- Byte-level vectors and fuzzing for the file transfer types.
+- **Qualified against [otfabric/iec104-interop v0.2.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.2.0)**, pinned by digest: lib60870-C v2.4.1, j60870 1.7.2 and, new, wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6 as a third independent implementation. All three pass in both directions.
+- File download against the reference stacks: `GetFile` fetches the files of a lib60870-C station with the content its fixture defines, and the lib60870-C and j60870 clients download from a go-iec104 station and see, ASDU by ASDU, what they see from the lib60870-C file server.
+- The interop suite reads the capabilities of each reference image and skips what an image does not declare: commands with time tag and file transfer for wendy512/iec104, the file server role for j60870.
+- The event queue is tested against all three reference clients: events queued before a connection arrive in order and their acknowledgements empty the queue.
+
+### Still open against lib60870-C
+
+- File transfer in control direction (upload), the file directory and deletion: typed in the codec, no procedure.
+- IEC 60870-5-101 serial link layer: out of scope for this module (see README).
+
+---
+
 ## v0.0.1
 
 **Date:** 2026-10-09

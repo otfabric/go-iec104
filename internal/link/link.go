@@ -81,8 +81,15 @@ const (
 )
 
 type sendReq struct {
-	asdu []byte
-	done chan error
+	asdu  []byte
+	acked func()
+	done  chan error
+}
+
+// outstanding is an I frame that was sent and not yet acknowledged.
+type outstanding struct {
+	sent  time.Time
+	acked func() // called when the peer acknowledges the frame; may be nil
 }
 
 type ctlReq struct {
@@ -141,7 +148,7 @@ type Link struct {
 	state       dtState
 	reported    bool // last data transfer state passed to OnState
 	vs, vr, ack uint16
-	unacked     []time.Time // send times of the outstanding I frames
+	unacked     []outstanding // I frames sent and not yet acknowledged
 	recvUnacked int
 	sentNR      uint16 // last N(R) sent to the peer
 	stopPending bool   // controlled station: STOPDT con is owed once the peer has acknowledged everything
@@ -210,6 +217,14 @@ func (l *Link) Close() error {
 // full (k unacknowledged frames) and returns once the frame was written, not
 // when it was acknowledged.
 func (l *Link) Send(ctx context.Context, asdu []byte) error {
+	return l.SendTracked(ctx, asdu, nil)
+}
+
+// SendTracked is Send with a notification: acked is called once the peer has
+// acknowledged the I frame. It is never called when the link ends first, so
+// the caller knows which frames may not have arrived. acked runs on the
+// protocol goroutine and must not block or call back into the link.
+func (l *Link) SendTracked(ctx context.Context, asdu []byte, acked func()) error {
 	if len(asdu) > apci.MaxASDULength {
 		return fmt.Errorf("%w: %d octets", apci.ErrASDUTooLong, len(asdu))
 	}
@@ -221,7 +236,7 @@ func (l *Link) Send(ctx context.Context, asdu []byte) error {
 	if !l.isStarted.Load() {
 		return iec104.ErrNotStarted
 	}
-	r := sendReq{asdu: asdu, done: make(chan error, 1)}
+	r := sendReq{asdu: asdu, acked: acked, done: make(chan error, 1)}
 	select {
 	case l.sendCh <- r:
 	case <-ctx.Done():
@@ -374,7 +389,7 @@ func (l *Link) untilDeadline() time.Duration {
 		}
 	}
 	if len(l.unacked) > 0 {
-		consider(l.unacked[0].Add(p.T1))
+		consider(l.unacked[0].sent.Add(p.T1))
 	}
 	for _, u := range l.pending {
 		consider(u.deadline)
@@ -396,7 +411,7 @@ func (l *Link) untilDeadline() time.Duration {
 
 func (l *Link) onTimer(now time.Time) error {
 	p := l.cfg.Params
-	if len(l.unacked) > 0 && !now.Before(l.unacked[0].Add(p.T1)) {
+	if len(l.unacked) > 0 && !now.Before(l.unacked[0].sent.Add(p.T1)) {
 		return fmt.Errorf("%w: I frame N(S)=%d not acknowledged", iec104.ErrTimeout, l.ack)
 	}
 	for fn, u := range l.pending {
@@ -444,7 +459,7 @@ func (l *Link) onSend(r sendReq) error {
 		return err
 	}
 	l.vs = apci.SeqNext(l.vs)
-	l.unacked = append(l.unacked, time.Now())
+	l.unacked = append(l.unacked, outstanding{sent: time.Now(), acked: r.acked})
 	r.done <- nil
 	return nil
 }
@@ -583,7 +598,14 @@ func (l *Link) acknowledge(nr uint16) error {
 	if !ok {
 		return fmt.Errorf("%w: received N(R)=%d, outstanding %d..%d", iec104.ErrProtocol, nr, l.ack, l.vs)
 	}
-	l.unacked = append(l.unacked[:0], l.unacked[n:]...)
+	for _, o := range l.unacked[:n] {
+		if o.acked != nil {
+			o.acked()
+		}
+	}
+	rest := copy(l.unacked, l.unacked[n:])
+	clear(l.unacked[rest:]) // drop the callbacks of what was acknowledged
+	l.unacked = l.unacked[:rest]
 	l.ack = nr
 	if l.stopPending && len(l.unacked) == 0 {
 		return l.confirmStop()

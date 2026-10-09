@@ -307,6 +307,15 @@ func (g *Group) CounterInterrogate(ctx context.Context, ca asdu.CommonAddr, requ
 	return c.CounterInterrogate(ctx, ca, request, freeze)
 }
 
+// GetFile downloads a file over the active connection. See [Client.GetFile].
+func (g *Group) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) ([]byte, error) {
+	c, err := g.use()
+	if err != nil {
+		return nil, err
+	}
+	return c.GetFile(ctx, ca, ioa, name)
+}
+
 // Read reads one information object over the active connection. See
 // [Client.Read].
 func (g *Group) Read(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) (*asdu.ASDU, error) {

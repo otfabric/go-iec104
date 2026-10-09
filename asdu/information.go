@@ -66,6 +66,14 @@ const (
 	kParamScaled
 	kParamFloat
 	kParamActivation
+	kFileReady
+	kSectionReady
+	kFileCall
+	kFileLast
+	kFileAck
+	kFileSegment
+	kFileDirectory
+	kFileQuery
 )
 
 type timeTag uint8
@@ -74,6 +82,7 @@ const (
 	tagNone timeTag = iota
 	tagCP24
 	tagCP56
+	tagCP56Pair // two CP56Time2a: a time range
 )
 
 func (t timeTag) size() int {
@@ -82,6 +91,8 @@ func (t timeTag) size() int {
 		return sizeCP24
 	case tagCP56:
 		return sizeCP56
+	case tagCP56Pair:
+		return 2 * sizeCP56
 	default:
 		return 0
 	}
@@ -96,6 +107,11 @@ type typeDesc struct {
 	size int // information elements, without address and time tag
 	tag  timeTag
 	dec  func(ioa IOA, b []byte, ts Timestamp, d *typeDesc) InformationObject
+	// variable marks a type whose single object ends in a byte string of
+	// its own length (F_SG_NA_1); size is then the fixed part.
+	variable bool
+	// dec2 replaces dec for a type with tagCP56Pair.
+	dec2 func(ioa IOA, b []byte, from, to Timestamp) InformationObject
 }
 
 var registry [256]*typeDesc
@@ -111,7 +127,7 @@ func register(id TypeID, name, desc string, k kind, size int, tag timeTag,
 	switch {
 	case tag == tagNone && def[0] == 0:
 		def[0] = id
-	case tag == tagCP56 && def[1] == 0:
+	case (tag == tagCP56 || tag == tagCP56Pair) && def[1] == 0:
 		def[1] = id
 	}
 	defaultTypes[k] = def
@@ -765,6 +781,208 @@ func (o ParameterActivation) body(b []byte, _ *typeDesc) ([]byte, error) {
 	return append(b, o.Qualifier), nil
 }
 
+// --- File transfer ---
+
+// File transfer qualifiers. Each is the low nibble of its octet; the high
+// nibble carries an error or a private qualifier.
+const (
+	// Select and call qualifier (SCQ) of [FileCall].
+	FileSelect        uint8 = 1 // Select file
+	FileRequest       uint8 = 2 // Request file
+	FileDeactivate    uint8 = 3 // Deactivate file
+	FileDelete        uint8 = 4 // Delete file
+	SectionSelect     uint8 = 5 // Select section
+	SectionRequest    uint8 = 6 // Request section
+	SectionDeactivate uint8 = 7 // Deactivate section
+
+	// Last section or segment qualifier (LSQ) of [FileLastSegment].
+	LastFileNoDeactivation    uint8 = 1 // File transfer without deactivation
+	LastFileDeactivation      uint8 = 2 // File transfer with deactivation
+	LastSectionNoDeactivation uint8 = 3 // Section transfer without deactivation
+	LastSectionDeactivation   uint8 = 4 // Section transfer with deactivation
+
+	// Acknowledge file or section qualifier (AFQ) of [FileAck].
+	AckFilePositive    uint8 = 1 // Positive acknowledge of file transfer
+	AckFileNegative    uint8 = 2 // Negative acknowledge of file transfer
+	AckSectionPositive uint8 = 3 // Positive acknowledge of section transfer
+	AckSectionNegative uint8 = 4 // Negative acknowledge of section transfer
+
+	// FileNegative is the bit of a file ready qualifier (FRQ) or section
+	// ready qualifier (SRQ) that refuses the select, request, deactivate or
+	// delete, or reports the section as not ready.
+	FileNegative uint8 = 0x80
+
+	// Status of file (SOF) flags of [FileDirectoryEntry]; the low five
+	// bits are a status value.
+	FileLastOfDirectory uint8 = 0x20 // LFD: last file of the directory
+	FileIsDirectory     uint8 = 0x40 // FOR: the name is a subdirectory
+	FileActive          uint8 = 0x80 // FA: the file is being transferred
+)
+
+// MaxFileLength is the largest length of a file or section (LOF): 24 bits.
+const MaxFileLength = 1<<24 - 1
+
+func appendFileLength(b []byte, n uint32) ([]byte, error) {
+	if n > MaxFileLength {
+		return b, rangeErr("length of file or section", int(n), 0, MaxFileLength)
+	}
+	return append(b, byte(n), byte(n>>8), byte(n>>16)), nil
+}
+
+func fileLength(b []byte) uint32 { return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 }
+
+// FileReady announces a file, or refuses a file request (NOF, LOF and FRQ):
+// F_FR_NA_1.
+type FileReady struct {
+	IOA       IOA
+	Name      uint16 // NOF: name of file
+	Length    uint32 // LOF: length in octets, up to MaxFileLength
+	Qualifier uint8  // FRQ; FileNegative when the request is refused
+}
+
+// Address returns the information object address.
+func (o FileReady) Address() IOA   { return o.IOA }
+func (FileReady) kind() kind       { return kFileReady }
+func (FileReady) stamp() Timestamp { return Timestamp{} }
+func (o FileReady) body(b []byte, _ *typeDesc) ([]byte, error) {
+	b, err := appendFileLength(binary.LittleEndian.AppendUint16(b, o.Name), o.Length)
+	return append(b, o.Qualifier), err
+}
+
+// SectionReady announces a section of a file (NOF, NOS, LOF and SRQ):
+// F_SR_NA_1.
+type SectionReady struct {
+	IOA       IOA
+	Name      uint16 // NOF: name of file
+	Section   uint8  // NOS: name of section
+	Length    uint32 // LOF: length of the section in octets
+	Qualifier uint8  // SRQ; FileNegative when the section is not ready
+}
+
+// Address returns the information object address.
+func (o SectionReady) Address() IOA   { return o.IOA }
+func (SectionReady) kind() kind       { return kSectionReady }
+func (SectionReady) stamp() Timestamp { return Timestamp{} }
+func (o SectionReady) body(b []byte, _ *typeDesc) ([]byte, error) {
+	b, err := appendFileLength(append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section), o.Length)
+	return append(b, o.Qualifier), err
+}
+
+// FileCall calls a directory, or selects, requests, deactivates or deletes
+// a file or a section (NOF, NOS and SCQ): F_SC_NA_1.
+type FileCall struct {
+	IOA       IOA
+	Name      uint16 // NOF: name of file
+	Section   uint8  // NOS: name of section
+	Qualifier uint8  // SCQ: FileSelect, FileRequest, ...
+}
+
+// Address returns the information object address.
+func (o FileCall) Address() IOA   { return o.IOA }
+func (FileCall) kind() kind       { return kFileCall }
+func (FileCall) stamp() Timestamp { return Timestamp{} }
+func (o FileCall) body(b []byte, _ *typeDesc) ([]byte, error) {
+	return append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section, o.Qualifier), nil
+}
+
+// FileLastSegment ends a section or a file and carries its checksum (NOF,
+// NOS, LSQ and CHS): F_LS_NA_1.
+type FileLastSegment struct {
+	IOA       IOA
+	Name      uint16 // NOF: name of file
+	Section   uint8  // NOS: name of section
+	Qualifier uint8  // LSQ: LastFile..., LastSection...
+	Checksum  uint8  // CHS: sum modulo 256 of the octets of the section or file
+}
+
+// Address returns the information object address.
+func (o FileLastSegment) Address() IOA   { return o.IOA }
+func (FileLastSegment) kind() kind       { return kFileLast }
+func (FileLastSegment) stamp() Timestamp { return Timestamp{} }
+func (o FileLastSegment) body(b []byte, _ *typeDesc) ([]byte, error) {
+	return append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section, o.Qualifier, o.Checksum), nil
+}
+
+// FileAck acknowledges a file or a section (NOF, NOS and AFQ): F_AF_NA_1.
+type FileAck struct {
+	IOA       IOA
+	Name      uint16 // NOF: name of file
+	Section   uint8  // NOS: name of section
+	Qualifier uint8  // AFQ: AckFilePositive, ...
+}
+
+// Address returns the information object address.
+func (o FileAck) Address() IOA   { return o.IOA }
+func (FileAck) kind() kind       { return kFileAck }
+func (FileAck) stamp() Timestamp { return Timestamp{} }
+func (o FileAck) body(b []byte, _ *typeDesc) ([]byte, error) {
+	return append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section, o.Qualifier), nil
+}
+
+// MaxSegmentLength is the largest segment an IEC 60870-5-104 ASDU can
+// carry: 249 octets less the data unit identifier, the address and the
+// segment header.
+const MaxSegmentLength = 249 - 6 - 3 - 4
+
+// FileSegment carries one segment of a section (NOF, NOS, LOS and the
+// segment): F_SG_NA_1. An ASDU holds exactly one segment. Because Data is a
+// slice, a FileSegment cannot be compared with ==.
+type FileSegment struct {
+	IOA     IOA
+	Name    uint16 // NOF: name of file
+	Section uint8  // NOS: name of section
+	Data    []byte // the segment, up to 255 octets (LOS) and the ASDU size
+}
+
+// Address returns the information object address.
+func (o FileSegment) Address() IOA   { return o.IOA }
+func (FileSegment) kind() kind       { return kFileSegment }
+func (FileSegment) stamp() Timestamp { return Timestamp{} }
+func (o FileSegment) body(b []byte, _ *typeDesc) ([]byte, error) {
+	if len(o.Data) > 255 {
+		return b, rangeErr("length of segment", len(o.Data), 0, 255)
+	}
+	b = append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section, byte(len(o.Data)))
+	return append(b, o.Data...), nil
+}
+
+// FileDirectoryEntry is one entry of a directory (NOF, LOF, SOF and
+// CP56Time2a): F_DR_TA_1. A directory is sent as a sequence (SQ = 1): the
+// address of each entry is the address of its file.
+type FileDirectoryEntry struct {
+	IOA    IOA
+	Name   uint16    // NOF: name of file or subdirectory
+	Length uint32    // LOF: length in octets
+	Status uint8     // SOF: status and the File... flags
+	Time   Timestamp // creation time
+}
+
+// Address returns the information object address.
+func (o FileDirectoryEntry) Address() IOA     { return o.IOA }
+func (FileDirectoryEntry) kind() kind         { return kFileDirectory }
+func (o FileDirectoryEntry) stamp() Timestamp { return o.Time }
+func (o FileDirectoryEntry) body(b []byte, _ *typeDesc) ([]byte, error) {
+	b, err := appendFileLength(binary.LittleEndian.AppendUint16(b, o.Name), o.Length)
+	return append(b, o.Status), err
+}
+
+// FileQueryLog requests an archive file for a time range (NOF and two
+// CP56Time2a): F_SC_NB_1.
+type FileQueryLog struct {
+	IOA   IOA
+	Name  uint16 // NOF: name of file
+	Start Timestamp
+	Stop  Timestamp
+}
+
+// Address returns the information object address.
+func (o FileQueryLog) Address() IOA   { return o.IOA }
+func (FileQueryLog) kind() kind       { return kFileQuery }
+func (FileQueryLog) stamp() Timestamp { return Timestamp{} }
+func (o FileQueryLog) body(b []byte, _ *typeDesc) ([]byte, error) {
+	return binary.LittleEndian.AppendUint16(b, o.Name), nil
+}
+
 // --- Decoders and registry ---
 
 func u16(b []byte) uint16 { return binary.LittleEndian.Uint16(b) }
@@ -788,7 +1006,7 @@ func init() {
 				full += " with CP24Time2a"
 			case tagCP56:
 				full += " with CP56Time2a"
-			case tagNone:
+			case tagNone, tagCP56Pair:
 			}
 			register(v.id, v.name, full, k, size, v.tag, d)
 		}
@@ -946,4 +1164,39 @@ func init() {
 		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
 			return ParameterActivation{IOA: a, Qualifier: b[0]}
 		})
+
+	register(F_FR_NA_1, "F_FR_NA_1", "File ready", kFileReady, 6, tagNone,
+		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
+			return FileReady{IOA: a, Name: u16(b), Length: fileLength(b[2:]), Qualifier: b[5]}
+		})
+	register(F_SR_NA_1, "F_SR_NA_1", "Section ready", kSectionReady, 7, tagNone,
+		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
+			return SectionReady{IOA: a, Name: u16(b), Section: b[2], Length: fileLength(b[3:]), Qualifier: b[6]}
+		})
+	register(F_SC_NA_1, "F_SC_NA_1", "Call directory, select file, call file, call section", kFileCall, 4, tagNone,
+		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
+			return FileCall{IOA: a, Name: u16(b), Section: b[2], Qualifier: b[3]}
+		})
+	register(F_LS_NA_1, "F_LS_NA_1", "Last section, last segment", kFileLast, 5, tagNone,
+		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
+			return FileLastSegment{IOA: a, Name: u16(b), Section: b[2], Qualifier: b[3], Checksum: b[4]}
+		})
+	register(F_AF_NA_1, "F_AF_NA_1", "Ack file, ack section", kFileAck, 4, tagNone,
+		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
+			return FileAck{IOA: a, Name: u16(b), Section: b[2], Qualifier: b[3]}
+		})
+	// The fixed part of a segment: name of file, name of section, length.
+	register(F_SG_NA_1, "F_SG_NA_1", "Segment", kFileSegment, 4, tagNone,
+		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
+			return FileSegment{IOA: a, Name: u16(b), Section: b[2], Data: append([]byte(nil), b[4:]...)}
+		})
+	registry[F_SG_NA_1].variable = true
+	register(F_DR_TA_1, "F_DR_TA_1", "Directory", kFileDirectory, 6, tagCP56,
+		func(a IOA, b []byte, ts Timestamp, _ *typeDesc) InformationObject {
+			return FileDirectoryEntry{IOA: a, Name: u16(b), Length: fileLength(b[2:]), Status: b[5], Time: ts}
+		})
+	register(F_SC_NB_1, "F_SC_NB_1", "Query log, request archive file", kFileQuery, 2, tagCP56Pair, nil)
+	registry[F_SC_NB_1].dec2 = func(a IOA, b []byte, from, to Timestamp) InformationObject {
+		return FileQueryLog{IOA: a, Name: u16(b), Start: from, Stop: to}
+	}
 }

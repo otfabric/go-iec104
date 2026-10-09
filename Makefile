@@ -21,17 +21,19 @@ GOFMT_CI = $(shell GOTOOLCHAIN=go$(GO_MOD_VERSION).0 go env GOROOT)/bin/gofmt
 # Output directory for generated binaries
 BIN_DIR := bin
 # Library packages: tests and coverage (exclude examples and test helpers)
-TEST_PKGS := $(shell go list ./... | grep -v '/examples' | grep -v '/internal/testutil')
+TEST_PKGS := $(shell go list ./... | grep -v '/examples' | grep -v '/internal/testutil' | grep -v '/internal/station')
 
 # Build tag of the interop package (excluded from default ./... builds).
 INTEROP_TAGS := interop
 
-# Reference implementations for 'make interop': otfabric/iec104-interop v0.1.0
-# (lib60870-C v2.4.1, OpenMUC j60870 1.7.2), pinned by multi-arch index digest.
+# Reference implementations for 'make interop': otfabric/iec104-interop v0.2.0
+# (lib60870-C v2.4.1, OpenMUC j60870 1.7.2, wendy512/iec104 v1.0.4 on
+# go-iecp5 v1.2.6), pinned by multi-arch index digest.
 # Keep in step with interop/harness.go. Override to test other builds, e.g.
 #   make interop IEC104_INTEROP_OPENMUC_IMAGE=ghcr.io/otfabric/iec104-interop-openmuc:dev
-IEC104_INTEROP_LIB60870_IMAGE ?= ghcr.io/otfabric/iec104-interop-lib60870@sha256:a1fbb44a16da39d5aa3f387456d1f2931811556e5a4298797a6b4ea64c4ef248
-IEC104_INTEROP_OPENMUC_IMAGE  ?= ghcr.io/otfabric/iec104-interop-openmuc@sha256:e1d15745d5e2005692f2844fb91c477826930b23fb772de14beb07da1942aa1a
+IEC104_INTEROP_LIB60870_IMAGE ?= ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72
+IEC104_INTEROP_OPENMUC_IMAGE  ?= ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174
+IEC104_INTEROP_WENDY512_IMAGE ?= ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03
 
 all: build ## Default target: build the examples
 
@@ -97,10 +99,11 @@ fuzz: ## Run the codec fuzz targets for FUZZTIME each (default 30s)
 	@go test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=$(FUZZTIME) ./apci
 	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./asdu
 
-test-interop: ## Run the interop suite against the lib60870 and OpenMUC reference images (needs Docker)
-	@echo "Running interop tests against $(IEC104_INTEROP_LIB60870_IMAGE) and $(IEC104_INTEROP_OPENMUC_IMAGE)"
+test-interop: ## Run the interop suite against the lib60870, OpenMUC and wendy512 reference images (needs Docker)
+	@echo "Running interop tests against $(IEC104_INTEROP_LIB60870_IMAGE), $(IEC104_INTEROP_OPENMUC_IMAGE) and $(IEC104_INTEROP_WENDY512_IMAGE)"
 	@IEC104_INTEROP_LIB60870_IMAGE="$(IEC104_INTEROP_LIB60870_IMAGE)" \
 		IEC104_INTEROP_OPENMUC_IMAGE="$(IEC104_INTEROP_OPENMUC_IMAGE)" \
+		IEC104_INTEROP_WENDY512_IMAGE="$(IEC104_INTEROP_WENDY512_IMAGE)" \
 		go test -tags=$(INTEROP_TAGS) -count=1 -timeout=20m ./interop/...
 
 interop: test-interop ## Alias for test-interop

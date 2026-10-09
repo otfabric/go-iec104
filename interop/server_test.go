@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/otfabric/go-iec104/asdu"
+	"github.com/otfabric/go-iec104/internal/station"
 )
 
 // scenario is one operation of a reference client and the outcome expected
@@ -19,6 +22,28 @@ type scenario struct {
 	mutates bool
 	args    string
 	want    string
+}
+
+// needs returns the features a reference client must declare to run the
+// scenario.
+func (sc scenario) needs() []string {
+	var out []string
+	if strings.Contains(sc.args, "--with-time") {
+		out = append(out, featTimeTaggedCommands)
+	}
+	if strings.HasPrefix(sc.args, "file-get") {
+		out = append(out, featFileClient)
+	}
+	return out
+}
+
+// fileASDUs is what a download of n segments in one section looks like.
+func fileASDUs(sections ...int) string {
+	s := "F_FR_NA_1/13"
+	for _, segments := range sections {
+		s += ",F_SR_NA_1/13" + strings.Repeat(",F_SG_NA_1/13", segments) + ",F_LS_NA_1/13"
+	}
+	return s + ",F_LS_NA_1/13"
 }
 
 const giASDUs = "C_IC_NA_1/7,M_SP_NA_1/20,M_DP_NA_1/20,M_ST_NA_1/20,M_BO_NA_1/20,M_SP_NA_1/20," +
@@ -55,6 +80,27 @@ var scenarios = []scenario{
 	{true, "command --type C_SC_NA_1 --ioa 510 --value false --mode sbo", "exit=0 ok=true error=- conf=7,7 term=true asdus=C_SC_NA_1/7,C_SC_NA_1/7,M_SP_TB_1/11,C_SC_NA_1/10"},
 	{true, "command --type C_SC_NA_1 --ioa 510 --value true --mode cancel", "exit=0 ok=true error=- conf=7,9 term=false asdus=C_SC_NA_1/7,C_SC_NA_1/9"},
 	{true, "command --type C_SC_NA_1 --ioa 510 --value true --mode select", "exit=0 ok=true error=- conf=7 term=false asdus=C_SC_NA_1/7"},
+	// File transfer: 1000 octets in one section, 5000 in sections of 2048,
+	// segments of 236.
+	{false, "file-get --ioa 30000", "exit=0 ok=true error=- conf= term=false asdus=" + fileASDUs(5)},
+	{false, "file-get --ioa 30001", "exit=0 ok=true error=- conf= term=false asdus=" + fileASDUs(9, 9, 4)},
+	{false, "file-get --ioa 39999", "exit=1 ok=false error=negative-confirmation conf= term=false asdus=F_SC_NA_1/47"},
+	{false, "file-get --ioa 30000 --name 9", "exit=1 ok=false error=negative-confirmation conf= term=false asdus=F_SC_NA_1/47"},
+}
+
+// reference returns the server a scenario's outcome is compared with: the
+// one of the client's own stack, or for file transfer, which not every
+// stack serves, any reference that does. It returns nil when there is none.
+func reference(t *testing.T, a adapter, sc scenario) *adapter {
+	if !strings.HasPrefix(sc.args, "file-get") || a.has(t, featFileServer) {
+		return &a
+	}
+	for _, other := range adapters(t) {
+		if other.has(t, featFileServer) {
+			return &other
+		}
+	}
+	return nil
 }
 
 // TestServerScenarios drives a go-iec104 station with every reference client
@@ -66,26 +112,48 @@ func TestServerScenarios(t *testing.T) {
 	for _, a := range adapters(t) {
 		t.Run(a.name, func(t *testing.T) {
 			fx := loadFixture(t, a)
-			sharedStation := startStation(t, fx)
-			sharedRef := startServer(t, a)
+			sharedStation := station.Start(t, fx)
+			// The reference servers the scenarios that leave the station
+			// alone are compared with, by adapter.
+			shared := map[string]*refServer{}
+			for _, sc := range scenarios {
+				if sc.mutates || !a.hasAll(t, sc.needs()...) {
+					continue
+				}
+				if other := reference(t, a, sc); other != nil && shared[other.name] == nil {
+					shared[other.name] = startServer(t, *other)
+				}
+			}
 			for _, sc := range scenarios {
 				t.Run(strings.ReplaceAll(sc.args, " ", "_"), func(t *testing.T) {
-					st, ref := sharedStation, sharedRef
+					a.need(t, sc.needs()...)
+					st := sharedStation
 					if sc.mutates {
-						st, ref = startStation(t, fx), startServer(t, a)
+						st = station.Start(t, fx)
 					}
 					args := strings.Fields(sc.args)
-					got := runClient(t, a, st.addr, args...)
+					got := runClient(t, a, st.Addr, args...)
 					if s := got.summary(); s != sc.want {
 						t.Fatalf("%s client against go-iec104:\n got  %s\n want %s", a.name, s, sc.want)
 					}
+
+					other := reference(t, a, sc)
+					if other == nil {
+						t.Logf("no reference serves this: the outcome is checked, the documents are not compared")
+						return
+					}
+					ref := shared[other.name]
+					if sc.mutates {
+						ref = startServer(t, *other)
+					}
 					want := runClientAgainst(t, a, ref, args...)
 					if s := want.summary(); s != sc.want {
-						t.Fatalf("%s client against its own server (the comparison is void):\n got  %s\n want %s", a.name, s, sc.want)
+						t.Fatalf("%s client against the %s server (the comparison is void):\n got  %s\n want %s",
+							a.name, other.name, s, sc.want)
 					}
 					if g, w := got.normalized(), want.normalized(); g != w {
-						t.Errorf("%s client sees a difference between go-iec104 and its own server.\n"+
-							"--- go-iec104 ---\n%s\n--- %s server ---\n%s", a.name, g, a.name, w)
+						t.Errorf("%s client sees a difference between go-iec104 and the %s server.\n"+
+							"--- go-iec104 ---\n%s\n--- %s server ---\n%s", a.name, other.name, g, other.name, w)
 					}
 				})
 			}
@@ -100,26 +168,26 @@ func TestServerValues(t *testing.T) {
 	for _, a := range adapters(t) {
 		t.Run(a.name, func(t *testing.T) {
 			fx := loadFixture(t, a)
-			st := startStation(t, fx)
+			st := station.Start(t, fx)
 
-			r := runClient(t, a, st.addr, "interrogate")
-			if got, want := observeResult(r, 20), fx.expected(false); !sameObserved(got, want) {
+			r := runClient(t, a, st.Addr, "interrogate")
+			if got, want := observeResult(r, 20), fx.Expected(false); !station.SameObserved(got, want) {
 				t.Errorf("interrogation:\n got  %v\n want %v", got, want)
 			}
-			r = runClient(t, a, st.addr, "counter-interrogate")
-			if got, want := observeResult(r, 37), fx.expected(true); !sameObserved(got, want) {
+			r = runClient(t, a, st.Addr, "counter-interrogate")
+			if got, want := observeResult(r, 37), fx.Expected(true); !station.SameObserved(got, want) {
 				t.Errorf("counter interrogation:\n got  %v\n want %v", got, want)
 			}
 
 			// A clock synchronization arrives with the time the client sent.
-			runClient(t, a, st.addr, "clock-sync", "--time", "2026-10-09T15:35:12.345Z")
+			runClient(t, a, st.Addr, "clock-sync", "--time", "2026-10-09T15:35:12.345Z")
 			want := time.Date(2026, 10, 9, 15, 35, 12, 345e6, time.UTC)
-			if got := st.clockTime(); !got.Equal(want) {
+			if got := st.ClockTime(); !got.Equal(want) {
 				t.Errorf("clock set to %v, want %v", got, want)
 			}
 
 			// A set point is reported with a time tag and is visible afterwards.
-			r = runClient(t, a, st.addr, "command", "--type", "C_SE_NC_1", "--ioa", "502", "--value", "49.5")
+			r = runClient(t, a, st.Addr, "command", "--type", "C_SE_NC_1", "--ioa", "502", "--value", "49.5")
 			var reported bool
 			for _, as := range r.ASDUs {
 				if as.Type == "M_ME_TF_1" && as.Cot == 11 && len(as.Objects) == 1 {
@@ -133,31 +201,31 @@ func TestServerValues(t *testing.T) {
 			if !reported {
 				t.Errorf("set point not reported as M_ME_TF_1 with a current time tag: %s", r.normalized())
 			}
-			r = runClient(t, a, st.addr, "read", "--ioa", "202")
+			r = runClient(t, a, st.Addr, "read", "--ioa", "202")
 			if got := observeResult(r, 5); len(got) != 1 || got[0].Value != 49.5 {
 				t.Errorf("read after set point: %v", got)
 			}
 
 			// Step commands move the position one step at a time.
 			for i := 0; i < 3; i++ {
-				runClient(t, a, st.addr, "command", "--type", "C_RC_NA_1", "--ioa", "505", "--value", "2")
+				runClient(t, a, st.Addr, "command", "--type", "C_RC_NA_1", "--ioa", "505", "--value", "2")
 			}
-			r = runClient(t, a, st.addr, "read", "--ioa", "102")
-			start := fx.point(102).Value.(float64)
+			r = runClient(t, a, st.Addr, "read", "--ioa", "102")
+			start := fx.Point(102).Value.(float64)
 			if got := observeResult(r, 5); len(got) != 1 || got[0].Value != start+3 {
 				t.Errorf("step position after three steps up from %v: %v", start, got)
 			}
 
 			// Select-before-operate: the selection is consumed by the execute.
-			r = runClient(t, a, st.addr, "command", "--type", "C_SC_NA_1", "--ioa", "510", "--value", "false", "--mode", "sbo")
+			r = runClient(t, a, st.Addr, "command", "--type", "C_SC_NA_1", "--ioa", "510", "--value", "false", "--mode", "sbo")
 			if !r.OK {
 				t.Errorf("select and execute: %s", r.summary())
 			}
-			r = runClient(t, a, st.addr, "command", "--type", "C_SC_NA_1", "--ioa", "510", "--value", "true")
+			r = runClient(t, a, st.Addr, "command", "--type", "C_SC_NA_1", "--ioa", "510", "--value", "true")
 			if r.OK || r.Error == nil || r.Error.Code != "negative-confirmation" {
 				t.Errorf("execute without a new select was accepted: %s", r.summary())
 			}
-			r = runClient(t, a, st.addr, "read", "--ioa", "100")
+			r = runClient(t, a, st.Addr, "read", "--ioa", "100")
 			if got := observeResult(r, 5); len(got) != 1 || got[0].Value != false {
 				t.Errorf("single point after select and execute: %v", got)
 			}
@@ -172,18 +240,18 @@ func TestServerSessions(t *testing.T) {
 	for _, a := range adapters(t) {
 		t.Run(a.name, func(t *testing.T) {
 			fx := loadFixture(t, a)
-			st := startStation(t, fx)
+			st := station.Start(t, fx)
 
 			// k=1, w=1: the client acknowledges every I frame and may not
 			// have more than one of its own outstanding.
-			r := runClient(t, a, st.addr, "interrogate", "--k", "1", "--w", "1")
-			if got, want := observeResult(r, 20), fx.expected(false); !r.OK || !sameObserved(got, want) {
+			r := runClient(t, a, st.Addr, "interrogate", "--k", "1", "--w", "1")
+			if got, want := observeResult(r, 20), fx.Expected(false); !r.OK || !station.SameObserved(got, want) {
 				t.Errorf("interrogation with k=1 w=1: %s", r.summary())
 			}
 
 			// An idle connection: the client's t3 (2s) expires several times
 			// and go-iec104 must answer each TESTFR act within t1 (2s).
-			r = runClient(t, a, st.addr, "connect", "--hold-ms", "7000", "--t1", "2", "--t2", "1", "--t3", "2",
+			r = runClient(t, a, st.Addr, "connect", "--hold-ms", "7000", "--t1", "2", "--t2", "1", "--t3", "2",
 				"--timeout-ms", "3000")
 			if !r.OK || !r.StopDT {
 				t.Errorf("connection idle for 7s with t3=2s: %s", r.summary())
@@ -192,13 +260,63 @@ func TestServerSessions(t *testing.T) {
 			// Three clients at once, each with its own session.
 			results := make(chan *result, 3)
 			for i := 0; i < 3; i++ {
-				go func() { results <- runClient(t, a, st.addr, "interrogate", "--collect-ms", "500") }()
+				go func() { results <- runClient(t, a, st.Addr, "interrogate", "--collect-ms", "500") }()
 			}
 			for i := 0; i < 3; i++ {
 				r := <-results
-				if got, want := observeResult(r, 20), fx.expected(false); !r.OK || !sameObserved(got, want) {
+				if got, want := observeResult(r, 20), fx.Expected(false); !r.OK || !station.SameObserved(got, want) {
 					t.Errorf("concurrent interrogation %d: %s", i, r.summary())
 				}
+			}
+		})
+	}
+}
+
+// TestServerEventQueue: events a go-iec104 station queued while no
+// controlling station was connected reach a reference client in order, and
+// the client's acknowledgements empty the queue.
+func TestServerEventQueue(t *testing.T) {
+	for _, a := range adapters(t) {
+		t.Run(a.name, func(t *testing.T) {
+			fx := loadFixture(t, a)
+			st := station.Start(t, fx)
+			const n = 30
+			for i := 1; i <= n; i++ {
+				ev := asdu.New(asdu.CauseSpontaneous, fx.Station.CommonAddr,
+					asdu.MeasuredScaled{IOA: 201, Value: int16(i), Time: asdu.Now()})
+				if err := st.Server.Enqueue(ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := st.Server.Pending("default"); got != n {
+				t.Fatalf("Pending = %d, want %d", got, n)
+			}
+
+			// w = 1: the client acknowledges every event at once. With a
+			// larger w the last few would still be unacknowledged when the
+			// client closes, and the station would rightly keep them for the
+			// next connection.
+			r := runClient(t, a, st.Addr, "monitor", "--duration-ms", "5000", "--max-asdus", "30",
+				"--k", "1", "--w", "1", "--collect-ms", "500")
+			if !r.OK || len(r.ASDUs) != n {
+				t.Fatalf("monitor: %s", r.summary())
+			}
+			for i, as := range r.ASDUs {
+				if as.Type != "M_ME_TE_1" || as.Cot != 3 || len(as.Objects) != 1 || as.Objects[0]["value"] != float64(i+1) {
+					t.Fatalf("event %d: %s %v", i+1, as.Type, as.Objects)
+				}
+			}
+			eventually(t, 5*time.Second, "queue acknowledged", func() bool { return st.Server.Pending("default") == 0 })
+
+			// The next controlling station gets only what is new.
+			if err := st.Server.Enqueue(asdu.New(asdu.CauseSpontaneous, fx.Station.CommonAddr,
+				asdu.SinglePoint{IOA: 100, Value: false, Time: asdu.Now()})); err != nil {
+				t.Fatal(err)
+			}
+			r = runClient(t, a, st.Addr, "monitor", "--duration-ms", "3000", "--max-asdus", "1", "--collect-ms", "300",
+				"--k", "1", "--w", "1")
+			if !r.OK || len(r.ASDUs) != 1 || r.ASDUs[0].Type != "M_SP_TB_1" {
+				t.Fatalf("second monitor: %s", r.summary())
 			}
 		})
 	}

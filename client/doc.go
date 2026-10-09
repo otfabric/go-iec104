@@ -17,6 +17,7 @@
 //
 //	points, err := c.Interrogate(ctx, 1, asdu.QOIStation)
 //	err = c.Command(ctx, 1, asdu.SingleCommand{IOA: 6001, Value: true})
+//	log, err := c.GetFile(ctx, 1, 30000, 1)
 //
 // All methods are safe for concurrent use.
 package client

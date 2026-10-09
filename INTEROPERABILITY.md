@@ -19,7 +19,7 @@ behaviour is the application's.
 | Port | 2404 by default, any |
 | TLS (IEC 62351-3) | yes, standard `crypto/tls`, default port 19998 |
 | IEC 62351-5 application-layer authentication | no |
-| Redundant connections (redundancy groups) | client: yes (`client.Group`); server: app. See [Redundancy](#redundancy) |
+| Redundant connections (redundancy groups) | yes, both roles. See [Redundancy](#redundancy) |
 
 ## Application layer framing
 
@@ -146,16 +146,19 @@ never selects these types; set `ASDU.Type` explicitly.
 
 ### File transfer
 
-| Type | ID | Description | Support |
-|------|----|-------------|---------|
-| `F_FR_NA_1` | 120 | File ready | raw |
-| `F_SR_NA_1` | 121 | Section ready | raw |
-| `F_SC_NA_1` | 122 | Call directory, select file, call file, call section | raw |
-| `F_LS_NA_1` | 123 | Last section, last segment | raw |
-| `F_AF_NA_1` | 124 | Ack file, ack section | raw |
-| `F_SG_NA_1` | 125 | Segment | raw |
-| `F_DR_TA_1` | 126 | Directory | raw |
-| `F_SC_NB_1` | 127 | Query log, request archive file | raw |
+| Type | ID | Description | Support | Go type |
+|------|----|-------------|---------|---------|
+| `F_FR_NA_1` | 120 | File ready | yes | `FileReady` |
+| `F_SR_NA_1` | 121 | Section ready | yes | `SectionReady` |
+| `F_SC_NA_1` | 122 | Call directory, select file, call file, call section | yes | `FileCall` |
+| `F_LS_NA_1` | 123 | Last section, last segment | yes | `FileLastSegment` |
+| `F_AF_NA_1` | 124 | Ack file, ack section | yes | `FileAck` |
+| `F_SG_NA_1` | 125 | Segment | yes | `FileSegment` |
+| `F_DR_TA_1` | 126 | Directory | yes | `FileDirectoryEntry` |
+| `F_SC_NB_1` | 127 | Query log, request archive file | yes | `FileQueryLog` |
+
+The types are encoded and decoded; the transfer procedure built from them is
+the application's.
 
 ### Private range
 
@@ -172,7 +175,7 @@ The test bit and the P/N bit are exposed as `ASDU.Test` and `ASDU.Negative`.
 | Function | Client | Server |
 |----------|--------|--------|
 | Station initialization (`M_EI_NA_1`) | received via `Handler` | app: send with `Session.Send` |
-| Cyclic, background, spontaneous transmission | received via `Handler` | app: `Session.Send`, `Server.Broadcast` |
+| Cyclic, background, spontaneous transmission | received via `Handler` | `Server.Enqueue` (queued per redundancy group, acknowledged delivery), `Session.Send`, `Server.Broadcast` |
 | Station interrogation, global and groups 1..16 | `Interrogate` | app, via `Mux` |
 | Counter interrogation, general and groups 1..4, freeze/reset qualifiers | `CounterInterrogate` | app, via `Mux` |
 | Read procedure | `Read` | app, via `Mux` |
@@ -184,7 +187,8 @@ The test bit and the P/N bit are exposed as `ASDU.Test` and `ASDU.Negative`.
 | Test procedure (`C_TS_TA_1`) | `TestCommand` | app, via `Mux` |
 | Reset process | `ResetProcess` | app, via `Mux` |
 | Parameter loading and activation | `Send` | app, via `Mux` |
-| File transfer | `Send` with raw payload | app, raw payload |
+| File transfer, monitor direction (download) | `GetFile` | `FileServer`, via `Mux` |
+| File transfer, control direction (upload), directory, deletion | app: typed ASDUs with `Send` | app: typed ASDUs via `Mux` |
 | Rejecting unknown type / cause / common address | reported as `NegativeError` | yes: `Mux` and `WithCommonAddrs` |
 | Rejecting unknown information object address | reported as `NegativeError` | app: `Session.Reject(req, asdu.CauseUnknownIOA)` |
 
@@ -197,10 +201,12 @@ registered for the type and provides `Confirm`, `Negative`, `Terminate` and
 The standard lets a controlled station serve several connections of one
 redundancy group, of which exactly one is started.
 
-- **Server**: accepts any number of connections; each has its own
-  STARTDT/STOPDT state (`Session.Started`). `Server.Broadcast` sends to
-  started sessions only. The library does not group sessions or enforce
-  "one started connection per group"; it sends to every started one.
+- **Server**: `WithRedundancyGroups` assigns each connection to a group by
+  the client's address (one group for everyone by default). Each connection
+  has its own STARTDT/STOPDT state; the connection of a group that started
+  data transfer last is its active one. `Server.Enqueue` delivers events to
+  the active connection of every group, buffers them while there is none
+  and repeats what was not acknowledged after a switchover.
 - **Client**: `client.Group` manages a redundancy group: every connection
   established, exactly one started, the standbys supervised by test frames,
   automatic failover when the active one is lost and manual `Switchover`.
@@ -215,16 +221,22 @@ redundancy group, of which exactly one is started.
 
 ## Verification status
 
-Besides its own tests the library is run against two independent
+Besides its own tests the library is run against three independent
 implementations, as client and as server, on every push. The reference
 builds are the images of
-[otfabric/iec104-interop v0.1.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.1.0),
+[otfabric/iec104-interop v0.2.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.2.0),
 pinned by digest:
 
 | Reference | Version | go-iec104 client → reference server | reference client → go-iec104 server |
 |-----------|---------|-------------------------------------|-------------------------------------|
 | MZ Automation lib60870-C | v2.4.1 | pass | pass |
-| OpenMUC j60870 | 1.7.2 | pass | pass |
+| OpenMUC j60870 | 1.7.2 | pass ¹ | pass |
+| wendy512/iec104 on go-iecp5 | v1.0.4 on v1.2.6 | pass ² | pass ² |
+
+¹ without file download: the j60870 reference has no file server.
+² without commands with time tag and without file transfer: go-iecp5 drops
+those types on reception. The suite reads what each reference declares and
+skips what it lacks.
 
 The suite (`make interop`, package `interop`) covers the types of the
 reference fixture: `M_SP`, `M_DP`, `M_ST`, `M_BO`, `M_ME_NA/NB/NC`, `M_IT`
@@ -233,6 +245,11 @@ and without time tag; `C_IC`, `C_CI`, `C_RD`, `C_CS`, `C_TS_TA`; the negative
 answers; STARTDT/STOPDT; the `k`/`w` windows at 1; `t3` in both directions.
 The other type identifications are covered by this repository's codec tests
 only.
+
+File download is verified in both roles: `GetFile` fetches the files of the
+lib60870-C station with the content its fixture defines, and the lib60870-C
+and j60870 clients download from `FileServer`, whose answers they cannot
+tell, ASDU by ASDU, from those of the lib60870-C file server.
 
 It has **not** been run against certified test equipment or field devices.
 Interoperability reports are welcome.

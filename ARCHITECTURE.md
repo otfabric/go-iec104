@@ -144,6 +144,14 @@ serially, sessions are served concurrently. `Mux` is a `Handler` that routes
 by type identification and produces the negative answers of the standard for
 what is not registered.
 
+Events take a different path from replies. `Server.Enqueue` appends to one
+queue per redundancy group; a pump goroutine per group sends the oldest
+pending event on the group's active session and marks it in flight. The link
+reports when the peer has acknowledged that I frame, and only then is the
+event removed. A session that stops or ends returns its in-flight events to
+pending, in their original order. That is what makes delivery "at least
+once" across a switchover without the application tracking anything.
+
 ## Testing
 
 | Layer | How it is tested |
@@ -151,6 +159,7 @@ what is not registered.
 | `apci`, `asdu` | Byte vectors from the standard, round trips over every type identification, error tables, fuzzing (parse, re-encode, fixed point) |
 | `internal/link` | A scripted peer writing raw APDUs over loopback TCP: windows, each timer, each violation |
 | `client`, `server` | Against each other over loopback TCP, including TLS, reconnect and server restart |
-| `interop` | Against lib60870-C and OpenMUC j60870 in containers, as client and as server (`make interop`) |
+| `e2e` | Client against server of this module, end to end over TCP and TLS, with the fixture-driven station of `internal/station` |
+| `interop` | Against lib60870-C, OpenMUC j60870 and wendy512/iec104 in containers, as client and as server (`make interop`) |
 
 Everything runs with the race detector.

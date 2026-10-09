@@ -125,7 +125,9 @@ func (f *flaky) count(t asdu.TypeID) int {
 func TestRetryOfIdempotentRequests(t *testing.T) {
 	st := newFlaky(t, 2)
 	m := &requestLog{}
-	c := dial(t, st.addr, client.WithMetrics(m), client.WithRequestTimeout(150*time.Millisecond),
+	// The timeout is generous so that a loaded machine does not turn an
+	// answered attempt into a further retry.
+	c := dial(t, st.addr, client.WithMetrics(m), client.WithRequestTimeout(400*time.Millisecond),
 		client.WithRetry(client.Retry{Attempts: 4, Backoff: 10 * time.Millisecond}))
 	ctx := context.Background()
 

@@ -88,8 +88,7 @@ const (
 	P_AC_NA_1 TypeID = 113 // Parameter activation
 )
 
-// File transfer. These types have no object model in this package: they
-// decode into [ASDU.Raw].
+// File transfer.
 const (
 	F_FR_NA_1 TypeID = 120 // File ready
 	F_SR_NA_1 TypeID = 121 // Section ready
@@ -101,27 +100,11 @@ const (
 	F_SC_NB_1 TypeID = 127 // Query log, request archive file
 )
 
-// rawNames names the type identifications that are defined by the standard
-// but carried as raw payload.
-var rawNames = map[TypeID][2]string{
-	F_FR_NA_1: {"F_FR_NA_1", "File ready"},
-	F_SR_NA_1: {"F_SR_NA_1", "Section ready"},
-	F_SC_NA_1: {"F_SC_NA_1", "Call directory, select file, call file, call section"},
-	F_LS_NA_1: {"F_LS_NA_1", "Last section, last segment"},
-	F_AF_NA_1: {"F_AF_NA_1", "Ack file, ack section"},
-	F_SG_NA_1: {"F_SG_NA_1", "Segment"},
-	F_DR_TA_1: {"F_DR_TA_1", "Directory"},
-	F_SC_NB_1: {"F_SC_NB_1", "Query log, request archive file"},
-}
-
 // String returns the standard mnemonic, for example "M_ME_NC_1", or
 // "TypeID(n)" for a type this package does not know.
 func (t TypeID) String() string {
 	if d := registry[t]; d != nil {
 		return d.name
-	}
-	if n, ok := rawNames[t]; ok {
-		return n[0]
 	}
 	return fmt.Sprintf("TypeID(%d)", uint8(t))
 }
@@ -132,7 +115,7 @@ func (t TypeID) Description() string {
 	if d := registry[t]; d != nil {
 		return d.desc
 	}
-	return rawNames[t][1]
+	return ""
 }
 
 // Supported reports whether this package can decode the type into typed
@@ -159,6 +142,12 @@ func (t TypeID) InControlDirection() bool {
 // double and regulating step commands, set points and bitstring commands.
 func (t TypeID) IsProcessCommand() bool {
 	return t >= 45 && t <= 69
+}
+
+// IsFileTransfer reports whether the type belongs to the file transfer
+// services (120..127).
+func (t TypeID) IsFileTransfer() bool {
+	return t >= F_FR_NA_1 && t <= F_SC_NB_1
 }
 
 // IsPrivate reports whether the type is in the range the standard reserves
