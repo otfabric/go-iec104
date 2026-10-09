@@ -30,6 +30,7 @@ var (
 	ErrTimeout        // t1 expired; connection closed
 	ErrProtocol       // peer violated the protocol; connection closed
 	ErrBusy           // identical request or conflicting procedure pending
+	ErrInHandler      // client request method called from inside a handler
 	ErrInvalidOption  // option value a client or server cannot be built with
 )
 
@@ -192,6 +193,8 @@ func (c *Client) Deactivate(ctx context.Context, ca asdu.CommonAddr, obj asdu.In
 func (c *Client) TestCommand(ctx context.Context, ca asdu.CommonAddr) error
 func (c *Client) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier uint8) error
 func (c *Client) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) ([]byte, error)
+func (c *Client) PutFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, sections ...[]byte) error
+func (c *Client) ListFiles(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) ([]asdu.FileDirectoryEntry, error)
 ```
 
 | Method | Sends | Returns when |
@@ -205,6 +208,8 @@ func (c *Client) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, 
 | `TestCommand` | `C_TS_TA_1` activation | activation confirmation |
 | `ResetProcess` | `C_RP_NA_1` activation | activation confirmation |
 | `GetFile` | `F_SC_NA_1` select, then the calls and acknowledgements of the procedure | the file is acknowledged; result is its content |
+| `PutFile` | `F_FR_NA_1` file ready, then the sections, segments and checksums the station calls for | the station acknowledged the file |
+| `ListFiles` | `F_SC_NA_1` with cause "request" | the entry marked as the last of the directory; result is the entries |
 
 - `Command` accepts `SingleCommand`, `DoubleCommand`, `StepCommand`,
   `SetpointNormalized`, `SetpointScaled`, `SetpointFloat` and
@@ -212,6 +217,10 @@ func (c *Client) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, 
 - Collected ASDUs are also delivered to the `Handler`.
 - Two requests with the same type, common address and object address cannot
   be pending at once (`ErrBusy`): their answers would be indistinguishable.
+- A request that is waiting when data transfer stops (`StopDT`, or a
+  switchover of a group) fails with `ErrNotStarted`: the station cannot
+  answer it any more. What the station sent before it confirmed the stop is
+  delivered first.
 - `GetFile` downloads a file (file transfer in monitor direction): select,
   call, then section by section, checking the length and checksum of every
   section and of the file and acknowledging them. A file the station refuses
@@ -219,6 +228,14 @@ func (c *Client) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, 
   acknowledged negatively and returned as `ErrProtocol`. The request timeout
   bounds each wait for the station, the context the whole transfer. It is
   never retried.
+- `PutFile` delivers a file (file transfer in control direction): each
+  argument after the name is one section, sent in segments of up to 236
+  octets. A station that refuses the file, or answers a section or the file
+  with a negative acknowledgement, is a `*iec104.NegativeError`. Timeouts as
+  for `GetFile`; never retried.
+- `ListFiles` calls the directory at `ioa` (0: the station's default one)
+  and collects `F_DR_TA_1` entries until the one with
+  `asdu.FileLastOfDirectory`. It only reads and is retried under `WithRetry`.
 
 ### Retries
 
@@ -230,7 +247,7 @@ transient reason:
 | Retried | `Interrogate`, `CounterInterrogate` with `asdu.FreezeRead`, `Read`, `TestCommand` |
 | Never retried | `Command`, `Deactivate`, `ClockSync`, `ResetProcess`, `CounterInterrogate` with a freeze or reset, `Send` |
 | Repeated on | `ErrNotConnected`, `ErrNotStarted`, `ErrConnectionLost`, `ErrTimeout`, `ErrProtocol`, an attempt that ran into the request timeout |
-| Not repeated on | `*NegativeError`, `ErrBusy`, `ErrClosed`, encode errors, the caller's context ending |
+| Not repeated on | `*NegativeError`, `ErrBusy`, `ErrInHandler`, `ErrClosed`, encode errors, the caller's context ending |
 
 Each attempt is bounded by the request timeout, the whole call by the
 caller's context. See [ERRORS.md](ERRORS.md#retries).
@@ -242,9 +259,8 @@ func (c *Client) Send(ctx context.Context, a *asdu.ASDU) error
 ```
 
 Transmits one ASDU and does not wait for an answer. Blocks while the send
-window is full. For parameters, private types, the file transfer services
-`GetFile` does not cover (directory, upload) and anything else the request
-methods leave out.
+window is full. For parameters, private types, file deletion and anything
+else the request methods leave out.
 
 ### Redundancy group
 
@@ -364,18 +380,28 @@ type FileSource interface {
 }
 type FileSourceFunc func(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) (File, bool)
 
+type FileSink interface {
+    AcceptFile(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, length int) bool
+    StoreFile(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, file File) error
+}
+
 type FileServer struct {
-    OnDone func(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, err error)
+    Sink      FileSink
+    Directory func(s *Session, ca asdu.CommonAddr, ioa asdu.IOA) []asdu.FileDirectoryEntry
+    OnDone    func(s *Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, err error)
 }
 func NewFileServer(source FileSource) *FileServer
 func (f *FileServer) HandleASDU(s *Session, a *asdu.ASDU)
 
-var FileTypes []asdu.TypeID // F_SC_NA_1, F_AF_NA_1
+var FileTypes []asdu.TypeID // F_SC, F_AF, F_FR, F_SR, F_SG, F_LS
 var ErrFileNotAcknowledged error
 ```
 
-`FileServer` is a `Handler` that serves files to controlling stations: file
-transfer in monitor direction, the counterpart of `Client.GetFile`.
+`FileServer` is a `Handler` for the file transfer services, the counterpart
+of `Client.GetFile`, `PutFile` and `ListFiles`: it serves the files of its
+`FileSource`, takes files into its `Sink` and answers directory calls with
+`Directory`. Each of the three is optional (`NewFileServer(nil)` for a
+station that only takes files); what is not set is refused.
 
 ```go
 mux.Handle(server.NewFileServer(source), server.FileTypes...)
@@ -396,9 +422,18 @@ mux.Handle(server.NewFileServer(source), server.FileTypes...)
 - `OnDone` reports the end of a transfer: `nil` once the file was
   acknowledged, `ErrFileNotAcknowledged` after a negative acknowledgement, a
   deactivation or a new selection.
-- A call out of order is refused with "unknown information object address".
-  The directory, deletion and transfer in control direction (upload) are not
-  served: such a call is mirrored with the P/N bit set.
+- **Taking a file**: the station is sent `F_FR_NA_1` and asks `Sink.AcceptFile`.
+  It then calls the file and each section (`F_SC_NA_1`), checks the length
+  and checksum of every section and of the file, and calls `Sink.StoreFile`
+  before it acknowledges the file. A mismatch, or an error from `StoreFile`,
+  makes the acknowledgement negative.
+- **Directory**: `F_SC_NA_1` with cause "request" is answered with the
+  entries `Directory` returns, as `F_DR_TA_1` sequences with cause
+  "request"; the last entry is marked `asdu.FileLastOfDirectory`. No entries
+  refuse the call.
+- A call or delivery out of order is refused with "unknown information
+  object address". Deletion is not served: such a call is mirrored with the
+  P/N bit set.
 
 ### Redundancy groups and the event queue
 
@@ -703,18 +738,28 @@ Errors: `ErrInvalidStart`, `ErrInvalidLength`, `ErrInvalidControl`,
   concurrent use.
 - A client `Handler` runs on one goroutine per connection; a server
   `Handler` on one goroutine per session. ASDUs arrive in wire order.
-- A server handler may call any method of the library. A client handler may
-  call `Send`, `State` and `Close`, but not the request methods (`Command`,
-  `Interrogate`, `Read`, …): their answers are delivered by the goroutine
-  the handler runs on, so they would only time out. Use another goroutine.
+- A server handler may call any method of the library, `Session.Close` and
+  `Server.Close` included. For one session the `Handler` and the state
+  handler run on the same goroutine, in protocol order.
+- A client `Handler` and state handler may call `Send`, `State`, `StartDT`,
+  `StopDT`, `Connect` and `Close`. The request methods (`Command`,
+  `Interrogate`, `Read`, `GetFile`, …) fail there at once with
+  `iec104.ErrInHandler`: their answers are delivered by the goroutine the
+  callback is holding. Use another goroutine.
+- State notifications are delivered one at a time and in order, on either
+  side. A closed client reports "disconnected" once, as the last thing.
 - A handler that blocks delays what follows on the same connection, including
   the answers other goroutines are waiting for in request methods. It does
   not delay acknowledgements or test frames: the protocol machine keeps
   running.
-- State handlers run on the protocol path and must not block. The client's
-  may call `State` and nothing else on the client.
+- `Close` (`Client`, `Group`, `Session`, `Server`) returns when the last
+  callback has returned and none follows; concurrent callers all wait for
+  that. `Client.Close` first gives the `Handler` what the connection had
+  already received and acknowledged. Called from inside a callback, `Close`
+  cannot wait for it: it returns at once, the `Handler` is not called again,
+  and the close completes when the callback returns.
 - A start handler (`WithStartHandler`) runs on its own goroutine and may call
-  any method. A switch handler (`WithSwitchHandler`) runs on the group's
-  supervisor and must not block.
+  any method. A switch handler (`WithSwitchHandler`) is called one call at a
+  time, in order, and may call the group, `Switchover` and `Close` included.
 - `asdu.ASDU` values passed to handlers are owned by the receiver; values
   passed to `Send` are not retained.

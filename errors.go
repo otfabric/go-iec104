@@ -47,6 +47,12 @@ var (
 	// one is still awaiting its confirmation.
 	ErrBusy = errors.New("iec104: request already pending")
 
+	// ErrInHandler reports a client request method (one that waits for the
+	// station's answer) called from inside the client's Handler or state
+	// handler. The answer could not be delivered while that call has not
+	// returned; issue the request from another goroutine.
+	ErrInHandler = errors.New("iec104: request from inside a handler")
+
 	// ErrInvalidOption reports an option value a client or server cannot be
 	// constructed with. Invalid protocol parameters are reported by the
 	// apci and asdu packages (apci.ErrInvalidParams, asdu.ErrInvalidParams).

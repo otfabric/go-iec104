@@ -21,6 +21,7 @@ How go-iec104 reports failures. For signatures see [API.md](API.md).
 | Station answers with P/N = 1 or cause 44..47 | `*iec104.NegativeError` | stays up |
 | Answer does not arrive before the deadline | wraps `context.DeadlineExceeded` | stays up |
 | Request while the same one is pending | `iec104.ErrBusy` | stays up |
+| Request method called from the client's `Handler` or state handler | `iec104.ErrInHandler` | stays up |
 | `Connect`/`Dial` could not establish the connection | `iec104.ErrConnectFailed`, wrapping the cause | - |
 | Client has no connection | `iec104.ErrNotConnected` | - |
 | Data transfer stopped (before STARTDT, after STOPDT) | `iec104.ErrNotStarted` | stays up |
@@ -49,6 +50,7 @@ Defined in the root package and shared by client and server:
 | `ErrTimeout` | `t1` expired; the connection was closed |
 | `ErrProtocol` | The peer violated the protocol; the connection was closed |
 | `ErrBusy` | An identical request, or a conflicting STARTDT/STOPDT, is in progress |
+| `ErrInHandler` | A request method was called from inside the client's `Handler` or state handler, where its answer cannot be delivered |
 | `ErrInvalidOption` | An option value a client or server cannot be constructed with |
 
 `server.ErrServerClosed` is what `Serve` and `ListenAndServe` return after

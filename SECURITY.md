@@ -37,7 +37,16 @@ Plain IEC 60870-5-104 carries no authentication and no encryption: anyone who ca
 - For mutual authentication set `ClientAuth: tls.RequireAndVerifyClientCert` and `ClientCAs` on the server and `Certificates` on the client. Without it a TLS server still accepts commands from any client
 - Authorization is the handler's job: `Session.Conn()` returns the `*tls.Conn`, whose `ConnectionState().PeerCertificates` identifies the controlling station
 - Keep private keys out of source control and give key files restrictive permissions (`chmod 600`)
-- The application-layer authentication of IEC 62351-5 (challenge/response on critical ASDUs) is **not** implemented
+- The application-layer security of IEC 62351-5 is **not** implemented: see below
+
+### Application-layer security (IEC 62351-5)
+
+IEC 62351-5 authenticates application messages themselves, on top of or instead of TLS; IEC TS 60870-5-7 says how it applies to IEC 60870-5-101 and -104. go-iec104 does not implement it.
+
+- What the library has: the type identifications (`asdu.S_CH_NA_1` .. `asdu.S_UC_NA_1`, `asdu.S_IT_TC_1`) and causes of transmission (`asdu.CauseAuthentication`, ...) are named, and such ASDUs are carried unchanged as `ASDU.Raw` in both directions. An application can therefore exchange them; the library neither creates nor checks them
+- What it does not have: the procedures (challenge and reply, session and update key management, message authentication codes, the statistics), in either edition of the standard
+- Why not yet: an implementation has to follow the normative text, and the 2023 edition of IEC 62351-5 with IEC TS 60870-5-7:2025 differs from the 2013 one. It also has to be tested against an independent implementation, and none of the three stacks this library is cross-tested with has one in its open-source release (lib60870-C offers the 2013 edition as a commercial add-on; j60870 and go-iecp5 only name the types)
+- Until then: use TLS with client certificates for authentication, and authorize in the handler by the certificate of the controlling station
 
 ### Hardening a Server
 

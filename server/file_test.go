@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
+	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/client"
 	"github.com/otfabric/go-iec104/internal/testutil"
@@ -276,4 +278,352 @@ func TestFileTransfersPerSession(t *testing.T) {
 			t.Errorf("OnDone: %v; the half-finished transfer must not be reported", err)
 		}
 	}
+}
+
+// sink keeps the files controlling stations deliver.
+type sink struct {
+	mu     sync.Mutex
+	files  map[asdu.IOA][]byte
+	shape  map[asdu.IOA][]int // section lengths
+	refuse asdu.IOA           // an address the station does not take
+	broken asdu.IOA           // an address it cannot store
+}
+
+func (k *sink) AcceptFile(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, length int) bool {
+	return ca == 1 && name == 1 && ioa != k.refuse && length <= 100000
+}
+
+func (k *sink) StoreFile(_ *server.Session, _ asdu.CommonAddr, ioa asdu.IOA, _ uint16, f server.File) error {
+	if ioa == k.broken {
+		return errors.New("disk full")
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	var all []byte
+	var shape []int
+	for _, s := range f.Sections {
+		all = append(all, s...)
+		shape = append(shape, len(s))
+	}
+	k.files[ioa], k.shape[ioa] = all, shape
+	return nil
+}
+
+func (k *sink) get(ioa asdu.IOA) ([]byte, []int, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	b, ok := k.files[ioa]
+	return b, k.shape[ioa], ok
+}
+
+func serveSink(t *testing.T, k *sink, done *[]error, mu *sync.Mutex) string {
+	t.Helper()
+	fs := server.NewFileServer(nil)
+	fs.Sink = k
+	fs.OnDone = func(_ *server.Session, _ asdu.CommonAddr, _ asdu.IOA, _ uint16, err error) {
+		mu.Lock()
+		*done = append(*done, err)
+		mu.Unlock()
+	}
+	mux := server.NewMux()
+	mux.Handle(fs, server.FileTypes...)
+	_, addr := serve(t, mux)
+	return addr
+}
+
+func TestFileUpload(t *testing.T) {
+	k := &sink{files: map[asdu.IOA][]byte{}, shape: map[asdu.IOA][]int{}, refuse: 66, broken: 77}
+	var done []error
+	var mu sync.Mutex
+	addr := serveSink(t, k, &done, &mu)
+	c := connect(t, addr)
+	ctx := context.Background()
+
+	uploads := map[asdu.IOA][]int{ // section lengths
+		1: {1}, 2: {asdu.MaxSegmentLength}, 3: {asdu.MaxSegmentLength + 1}, 4: {1000},
+		5: {2048, 2048, 904}, 6: {}, 7: {0, 10, 0}, 8: {30000, 30000, 10000},
+	}
+	for ioa, lengths := range uploads {
+		var sections [][]byte
+		var want []byte
+		for i, n := range lengths {
+			sec := pattern(n, int(ioa)+i)
+			sections = append(sections, sec)
+			want = append(want, sec...)
+		}
+		if err := c.PutFile(ctx, 1, ioa, 1, sections...); err != nil {
+			t.Fatalf("PutFile %d %v: %v", ioa, lengths, err)
+		}
+		got, shape, ok := k.get(ioa)
+		if !ok || !bytes.Equal(got, want) || fmt.Sprint(shape) != fmt.Sprint(lengths) {
+			t.Errorf("file %d: stored %d octets in sections %v, want %d in %v", ioa, len(got), shape, len(want), lengths)
+		}
+	}
+
+	// What the station does not take.
+	for what, tc := range map[string]struct {
+		ca   asdu.CommonAddr
+		ioa  asdu.IOA
+		name uint16
+		size int
+	}{"refused address": {1, 66, 1, 10}, "wrong name": {1, 9, 2, 10}, "too long": {1, 9, 1, 100001}} {
+		err := c.PutFile(ctx, tc.ca, tc.ioa, tc.name, pattern(tc.size, 0))
+		if got := cause(t, err); got != asdu.CauseUnknownIOA {
+			t.Errorf("%s: cause = %s, want unknown-ioa", what, got)
+		}
+	}
+	// A file that arrives intact but cannot be stored is not acknowledged.
+	var neg *iec104.NegativeError
+	if err := c.PutFile(ctx, 1, 77, 1, pattern(10, 0)); !errors.As(err, &neg) {
+		t.Errorf("file the station cannot store: %v, want a negative acknowledgement", err)
+	} else if ack, ok := neg.ASDU.First().(asdu.FileAck); !ok || ack.Qualifier != asdu.AckFileNegative {
+		t.Errorf("file the station cannot store: answered %s", neg.ASDU)
+	}
+	if _, _, ok := k.get(77); ok {
+		t.Error("the file that could not be stored is in the sink")
+	}
+	// More than the procedure can carry never leaves the client.
+	if err := c.PutFile(ctx, 1, 9, 1, make([][]byte, 255)...); !errors.Is(err, asdu.ErrInvalidValue) {
+		t.Errorf("255 sections: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	good, bad := 0, 0
+	for _, err := range done {
+		if err == nil {
+			good++
+		} else {
+			bad++
+		}
+	}
+	if good != len(uploads) || bad != 1 {
+		t.Errorf("OnDone: %d transfers succeeded and %d failed; want %d and 1", good, bad, len(uploads))
+	}
+}
+
+// A station without a sink refuses every file; one that only takes files
+// refuses every download.
+func TestFileServerRoles(t *testing.T) {
+	mux := server.NewMux()
+	mux.Handle(server.NewFileServer(&fileStation{files: map[asdu.IOA]server.File{1: server.NewFile(pattern(5, 0), 0)}}), server.FileTypes...)
+	_, addr := serve(t, mux)
+	c := connect(t, addr)
+	ctx := context.Background()
+	if got := cause(t, c.PutFile(ctx, 1, 1, 1, pattern(5, 0))); got != asdu.CauseUnknownIOA {
+		t.Errorf("upload to a station without a sink: %s", got)
+	}
+	if _, err := c.ListFiles(ctx, 1, 0); cause(t, err) != asdu.CauseUnknownIOA {
+		t.Errorf("directory of a station without one: %v", err)
+	}
+	if got, err := c.GetFile(ctx, 1, 1, 1); err != nil || len(got) != 5 {
+		t.Errorf("download still works: %v", err)
+	}
+
+	var done []error
+	var mu sync.Mutex
+	c = connect(t, serveSink(t, &sink{files: map[asdu.IOA][]byte{}, shape: map[asdu.IOA][]int{}}, &done, &mu))
+	if _, err := c.GetFile(ctx, 1, 1, 1); cause(t, err) != asdu.CauseUnknownIOA {
+		t.Errorf("download from a station that only takes files: %v", err)
+	}
+}
+
+// What a file server answers to a delivery that breaks the procedure.
+func TestFileUploadFaults(t *testing.T) {
+	k := &sink{files: map[asdu.IOA][]byte{}, shape: map[asdu.IOA][]int{}}
+	var done []error
+	var mu sync.Mutex
+	rec := &recorder{}
+	c := connect(t, serveSink(t, k, &done, &mu), client.WithHandler(rec))
+	ctx := context.Background()
+	send := func(obj asdu.InformationObject) {
+		t.Helper()
+		if err := c.Send(ctx, asdu.New(asdu.CauseFileTransfer, 1, obj)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	answer := func(obj asdu.InformationObject) *asdu.ASDU {
+		t.Helper()
+		n := len(rec.all())
+		send(obj)
+		testutil.Eventually(t, "an answer", func() bool { return len(rec.all()) > n })
+		return rec.all()[n]
+	}
+	refused := func(what string, a *asdu.ASDU) {
+		t.Helper()
+		if !a.Negative || a.Cause != asdu.CauseUnknownIOA {
+			t.Errorf("%s: answered %s, want a negative mirror with unknown-ioa", what, a)
+		}
+	}
+	ack := func(what string, a *asdu.ASDU, want uint8) {
+		t.Helper()
+		if v, ok := a.First().(asdu.FileAck); !ok || v.Qualifier != want {
+			t.Errorf("%s: answered %s %+v, want acknowledgement %d", what, a, a.First(), want)
+		}
+	}
+	data := pattern(10, 0)
+	ready := asdu.FileReady{IOA: 1, Name: 1, Length: 10}
+	section := asdu.SectionReady{IOA: 1, Name: 1, Section: 1, Length: 10}
+	segment := asdu.FileSegment{IOA: 1, Name: 1, Section: 1, Data: data}
+	lastSegment := asdu.FileLastSegment{IOA: 1, Name: 1, Section: 1, Qualifier: asdu.LastSectionNoDeactivation, Checksum: sum(data)}
+	lastSection := asdu.FileLastSegment{IOA: 1, Name: 1, Section: 2, Qualifier: asdu.LastFileNoDeactivation, Checksum: sum(data)}
+	begin := func() {
+		t.Helper()
+		if call, ok := answer(ready).First().(asdu.FileCall); !ok || call.Qualifier != asdu.FileRequest {
+			t.Fatal("file ready was not answered with the call of the file")
+		}
+	}
+
+	refused("section ready without file ready", answer(section))
+	refused("segment without file ready", answer(segment))
+	refused("last segment without file ready", answer(lastSegment))
+
+	begin()
+	refused("section 2 before section 1", answer(asdu.SectionReady{IOA: 1, Name: 1, Section: 2, Length: 10}))
+	refused("a section longer than the file", answer(asdu.SectionReady{IOA: 1, Name: 1, Section: 1, Length: 11}))
+	refused("segment before its section", answer(segment))
+
+	// A section whose checksum is wrong.
+	begin()
+	answer(section)
+	send(segment)
+	bad := lastSegment
+	bad.Checksum++
+	ack("wrong section checksum", answer(bad), asdu.AckSectionNegative)
+
+	// A section with more data than it announced.
+	begin()
+	answer(section)
+	send(segment)
+	send(segment)
+	ack("too much data", answer(lastSegment), asdu.AckSectionNegative)
+
+	// A file that ends before everything announced has arrived.
+	begin()
+	short := lastSection
+	short.Section, short.Checksum = 1, 0
+	ack("file shorter than announced", answer(short), asdu.AckFileNegative)
+
+	// A file whose checksum is wrong.
+	begin()
+	answer(section)
+	send(segment)
+	ack("section", answer(lastSegment), asdu.AckSectionPositive)
+	badFile := lastSection
+	badFile.Checksum++
+	ack("wrong file checksum", answer(badFile), asdu.AckFileNegative)
+
+	// Abandoned by the controlling station, then delivered properly.
+	begin()
+	abandon := lastSection
+	abandon.Qualifier = asdu.LastFileDeactivation
+	send(abandon)
+	begin()
+	answer(section)
+	send(segment)
+	ack("section", answer(lastSegment), asdu.AckSectionPositive)
+	ack("file", answer(lastSection), asdu.AckFilePositive)
+	if got, _, ok := k.get(1); !ok || !bytes.Equal(got, data) {
+		t.Errorf("the file delivered at last: %v", got)
+	}
+
+	testutil.Eventually(t, "every transfer reported", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(done) == 7
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	failed := 0
+	for _, err := range done {
+		if err != nil {
+			failed++
+		}
+	}
+	if failed != 6 {
+		t.Errorf("OnDone reported %d failures of %d transfers, want 6 of 7: %v", failed, len(done), done)
+	}
+}
+
+func TestFileDirectory(t *testing.T) {
+	when := asdu.At(time.Date(2026, 3, 4, 5, 6, 7, 8e6, time.UTC))
+	entry := func(ioa asdu.IOA, n int) asdu.FileDirectoryEntry {
+		return asdu.FileDirectoryEntry{IOA: ioa, Name: uint16(n), Length: uint32(n) * 100, Status: 1, Time: when}
+	}
+	dirs := map[asdu.IOA][]asdu.FileDirectoryEntry{
+		// The default directory: scattered addresses.
+		0: {entry(10, 1), entry(500, 2), entry(70000, 3)},
+		// More consecutive addresses than one ASDU holds.
+		1: nil,
+		// A single file.
+		2: {entry(9, 9)},
+		// Runs and gaps; one entry arrives already marked as the last.
+		3: {entry(1, 1), entry(2, 2), entry(3, 3), entry(8, 4), entry(9, 5)},
+	}
+	for i := 0; i < 50; i++ {
+		dirs[1] = append(dirs[1], entry(asdu.IOA(1000+i), i))
+	}
+	dirs[3][1].Status |= asdu.FileLastOfDirectory
+
+	fs := server.NewFileServer(nil)
+	fs.Directory = func(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA) []asdu.FileDirectoryEntry {
+		if ca != 1 {
+			return nil
+		}
+		return dirs[ioa]
+	}
+	mux := server.NewMux()
+	mux.Handle(fs, server.FileTypes...)
+	_, addr := serve(t, mux)
+	rec := &recorder{}
+	c := connect(t, addr, client.WithHandler(rec))
+	ctx := context.Background()
+
+	for ioa, want := range dirs {
+		rec.mu.Lock()
+		rec.seen = nil
+		rec.mu.Unlock()
+		got, err := c.ListFiles(ctx, 1, ioa)
+		if err != nil {
+			t.Fatalf("ListFiles %d: %v", ioa, err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("directory %d: %d entries, want %d", ioa, len(got), len(want))
+		}
+		for i, e := range got {
+			w := want[i]
+			w.Status &^= asdu.FileLastOfDirectory
+			if i == len(want)-1 {
+				w.Status |= asdu.FileLastOfDirectory
+			}
+			if e != w {
+				t.Errorf("directory %d entry %d: %+v, want %+v", ioa, i, e, w)
+			}
+		}
+		for _, a := range rec.all() {
+			if a.Type != asdu.F_DR_TA_1 || a.Cause != asdu.CauseRequest || !a.Sequence || len(a.Objects) > 18 {
+				t.Errorf("directory %d sent as %s", ioa, a)
+			}
+		}
+	}
+	// The source's own entries were not touched.
+	if dirs[3][1].Status&asdu.FileLastOfDirectory == 0 || dirs[0][2].Status&asdu.FileLastOfDirectory != 0 {
+		t.Error("the directory callback's entries were modified")
+	}
+	// No such directory, no such station.
+	_, err := c.ListFiles(ctx, 1, 99)
+	if got := cause(t, err); got != asdu.CauseUnknownIOA {
+		t.Errorf("unknown directory: %s", got)
+	}
+	_, err = c.ListFiles(ctx, 2, 0)
+	if got := cause(t, err); got != asdu.CauseUnknownIOA {
+		t.Errorf("directory of another station: %s", got)
+	}
+}
+
+func sum(b []byte) (s uint8) {
+	for _, v := range b {
+		s += v
+	}
+	return s
 }

@@ -18,3 +18,14 @@ jobs:
       codecov-name: go-iec104
       go-versions: '["1.23", "1.24", "1.25", "1.26"]'
     secrets: inherit
+
+  # The self-contained examples must keep running as they are.
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - run: make build examples

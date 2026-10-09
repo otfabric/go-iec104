@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -295,4 +297,171 @@ func TestTerminationIsNotAConfirmation(t *testing.T) {
 			t.Fatalf("interrogation %d: %d ASDUs, %v", i, len(data), err)
 		}
 	}
+}
+
+func TestPutFileFaults(t *testing.T) {
+	data := []byte{9, 8, 7, 6, 5}
+	objs := func(o ...asdu.InformationObject) []asdu.InformationObject { return o }
+	callFile := asdu.FileCall{IOA: 1, Name: 1, Qualifier: asdu.FileRequest}
+	callSection := asdu.FileCall{IOA: 1, Name: 1, Section: 1, Qualifier: asdu.SectionRequest}
+	ackSection := asdu.FileAck{IOA: 1, Name: 1, Section: 1, Qualifier: asdu.AckSectionPositive}
+	ackFile := asdu.FileAck{IOA: 1, Name: 1, Section: 2, Qualifier: asdu.AckFilePositive}
+	nakSection, nakFile := ackSection, ackFile
+	nakSection.Qualifier, nakFile.Qualifier = asdu.AckSectionNegative, asdu.AckFileNegative
+	otherSection := callSection
+	otherSection.Section = 2
+	// The station is sent: file ready, section ready, one segment, last
+	// segment, last section. Each entry answers one of them.
+	none := objs()
+	for _, tc := range []struct {
+		name     string
+		answers  [][]asdu.InformationObject
+		ok       bool
+		negative bool // want *iec104.NegativeError, else ErrProtocol
+	}{
+		{name: "correct", answers: [][]asdu.InformationObject{objs(callFile), objs(callSection), none, objs(ackSection), objs(ackFile)}, ok: true},
+		{name: "file refused by its own file ready", negative: true,
+			answers: [][]asdu.InformationObject{objs(asdu.FileReady{IOA: 1, Name: 1, Qualifier: asdu.FileNegative})}},
+		{name: "section not acknowledged", negative: true,
+			answers: [][]asdu.InformationObject{objs(callFile), objs(callSection), none, objs(nakSection)}},
+		{name: "file not acknowledged", negative: true,
+			answers: [][]asdu.InformationObject{objs(callFile), objs(callSection), none, objs(ackSection), objs(nakFile)}},
+		{name: "section called before the file", answers: [][]asdu.InformationObject{objs(callSection)}},
+		{name: "another section called", answers: [][]asdu.InformationObject{objs(callFile), objs(otherSection)}},
+		{name: "acknowledgement instead of a call", answers: [][]asdu.InformationObject{objs(ackFile)}},
+		{name: "call instead of an acknowledgement",
+			answers: [][]asdu.InformationObject{objs(callFile), objs(callSection), none, objs(callSection)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &script{answers: tc.answers}
+			c := dial(t, serveHandler(t, sc))
+			err := c.PutFile(context.Background(), 1, 1, 1, data)
+			var neg *iec104.NegativeError
+			switch {
+			case tc.ok:
+				if err != nil {
+					t.Fatalf("PutFile: %v", err)
+				}
+				// What the station was sent, in order.
+				var kinds []string
+				for _, o := range sc.received() {
+					switch v := o.(type) {
+					case asdu.FileReady:
+						kinds = append(kinds, "ready")
+						if v.Length != 5 {
+							t.Errorf("file ready announces %d octets", v.Length)
+						}
+					case asdu.SectionReady:
+						kinds = append(kinds, "section")
+					case asdu.FileSegment:
+						kinds = append(kinds, "segment")
+						if !bytes.Equal(v.Data, data) {
+							t.Errorf("segment %v", v.Data)
+						}
+					case asdu.FileLastSegment:
+						kinds = append(kinds, "last")
+						if v.Checksum != 35 {
+							t.Errorf("checksum %d, want 35", v.Checksum)
+						}
+					}
+				}
+				if got := strings.Join(kinds, " "); got != "ready section segment last last" {
+					t.Errorf("the station was sent: %s", got)
+				}
+			case tc.negative:
+				if !errors.As(err, &neg) {
+					t.Fatalf("error = %v, want *iec104.NegativeError", err)
+				}
+			default:
+				if !errors.Is(err, iec104.ErrProtocol) {
+					t.Fatalf("error = %v, want ErrProtocol", err)
+				}
+			}
+		})
+	}
+
+	// A station that knows nothing of file transfer mirrors the file ready.
+	c := dial(t, serveHandler(t, nil))
+	if got := negativeCause(t, c.PutFile(context.Background(), 1, 1, 1, data)); got != asdu.CauseUnknownType {
+		t.Errorf("cause = %s, want unknown-type", got)
+	}
+	if _, err := c.ListFiles(context.Background(), 1, 0); negativeCause(t, err) != asdu.CauseUnknownType {
+		t.Errorf("ListFiles: %v", err)
+	}
+}
+
+// A directory that never ends, and one a group fetches.
+func TestListFiles(t *testing.T) {
+	var calls atomic.Int64
+	addr := serveHandler(t, server.HandlerFunc(func(s *server.Session, req *asdu.ASDU) {
+		entry := asdu.FileDirectoryEntry{IOA: 5, Name: 1, Length: 10}
+		if calls.Add(1) > 1 {
+			entry.Status = asdu.FileLastOfDirectory
+		}
+		// A positive mirror first: it says nothing and is skipped.
+		_ = s.Reply(req, asdu.CauseRequest, false)
+		_ = s.Send(s.Context(), asdu.New(asdu.CauseRequest, req.CommonAddr, entry))
+	}))
+	ctx := context.Background()
+	c := dial(t, addr, client.WithRequestTimeout(200*time.Millisecond))
+	entries, err := c.ListFiles(ctx, 1, 0)
+	if !errors.Is(err, context.DeadlineExceeded) || len(entries) != 1 {
+		t.Errorf("directory without a last entry: %d entries, %v; want what arrived and a deadline error", len(entries), err)
+	}
+	g, err := client.NewGroup([]string{addr}, client.WithParams(testutil.Params()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = g.Close() }()
+	if err := g.PutFile(ctx, 1, 1, 1); !errors.Is(err, iec104.ErrNotConnected) {
+		t.Errorf("Group.PutFile before Connect: %v", err)
+	}
+	if _, err := g.ListFiles(ctx, 1, 0); !errors.Is(err, iec104.ErrNotConnected) {
+		t.Errorf("Group.ListFiles before Connect: %v", err)
+	}
+	if err := g.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := g.ListFiles(ctx, 1, 0); err != nil || len(entries) != 1 {
+		t.Errorf("Group.ListFiles: %d entries, %v", len(entries), err)
+	}
+}
+
+// A directory that arrives in the middle of a transfer, listing the file
+// that is being transferred first, belongs to a directory call and not to
+// the transfer: fetching, delivering and listing may run at once.
+func TestDirectoryDuringTransfer(t *testing.T) {
+	content := bytes.Repeat([]byte{0xA5}, 3000)
+	directory := func(s *server.Session, ca asdu.CommonAddr, ioa asdu.IOA) {
+		_ = s.Send(s.Context(), asdu.New(asdu.CauseRequest, ca,
+			asdu.FileDirectoryEntry{IOA: ioa, Name: 1, Length: 10, Status: asdu.FileLastOfDirectory}))
+	}
+	fs := server.NewFileServer(server.FileSourceFunc(
+		func(s *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, _ uint16) (server.File, bool) {
+			directory(s, ca, ioa) // ahead of "file ready"
+			return server.NewFile(content, 1024), true
+		}))
+	fs.Sink = sinkFunc(func(s *server.Session, ca asdu.CommonAddr, ioa asdu.IOA) { directory(s, ca, ioa) })
+	mux := server.NewMux()
+	mux.Handle(fs, server.FileTypes...)
+	c := dial(t, serveHandler(t, mux))
+	ctx := context.Background()
+	if got, err := c.GetFile(ctx, 1, 7, 1); err != nil || !bytes.Equal(got, content) {
+		t.Errorf("GetFile with a directory in between: %d octets, %v", len(got), err)
+	}
+	if err := c.PutFile(ctx, 1, 9, 1, content); err != nil {
+		t.Errorf("PutFile with a directory in between: %v", err)
+	}
+}
+
+// sinkFunc accepts every file, after calling the function.
+type sinkFunc func(s *server.Session, ca asdu.CommonAddr, ioa asdu.IOA)
+
+func (f sinkFunc) AcceptFile(s *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, _ uint16, _ int) bool {
+	f(s, ca, ioa)
+	return true
+}
+
+func (sinkFunc) StoreFile(*server.Session, asdu.CommonAddr, asdu.IOA, uint16, server.File) error {
+	return nil
 }

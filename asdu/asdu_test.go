@@ -668,6 +668,33 @@ func TestMetadata(t *testing.T) {
 	}
 }
 
+// The secure authentication types are named and carried, not modelled.
+func TestSecurityTypes(t *testing.T) {
+	n := 0
+	for id := 0; id < 256; id++ {
+		typ := TypeID(id)
+		if !typ.IsSecurity() {
+			continue
+		}
+		n++
+		if typ.Supported() || typ.IsPrivate() || !strings.HasPrefix(typ.String(), "S_") || typ.Description() == "" {
+			t.Errorf("%d: %s %q, supported %v", id, typ, typ.Description(), typ.Supported())
+		}
+	}
+	if n != 14 || S_CH_NA_1.String() != "S_CH_NA_1" || S_IT_TC_1 != 41 || S_UC_NA_1 != 95 {
+		t.Errorf("%d security types", n)
+	}
+	a := &ASDU{Type: S_CH_NA_1, Cause: CauseAuthentication, CommonAddr: 1, Raw: []byte{1, 2, 3, 4}, RawCount: 1}
+	wire, err := a.Encode(IEC104)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Decode(wire, IEC104)
+	if err != nil || !reflect.DeepEqual(back, a) {
+		t.Errorf("round trip: %+v, %v", back, err)
+	}
+}
+
 func FuzzDecode(f *testing.F) {
 	for _, obj := range append(append(samples(Timestamp{}), samples(At(ts))...), untagged()...) {
 		b, err := New(CauseSpontaneous, 1, obj).Encode(IEC104)

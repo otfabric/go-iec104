@@ -4,7 +4,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test coverage cover bench fuzz check clean interop test-interop
+.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test coverage cover bench fuzz check clean interop test-interop
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
@@ -43,6 +43,15 @@ build: ## Build the example client and server into ./bin
 	@for dir in examples/*/; do \
 		name="$$(basename "$$dir")"; \
 		go build -o "$(BIN_DIR)/example-$$name" "./$$dir"; \
+	done
+
+# The self-contained examples: each starts both sides and exits by itself.
+RUN_EXAMPLES := quickstart commands files events redundancy tls observability
+
+examples: ## Run the self-contained examples (each must exit successfully)
+	@for e in $(RUN_EXAMPLES); do \
+		echo "Running example $$e"; \
+		go run ./examples/$$e >/dev/null || { echo "example $$e failed"; exit 1; }; \
 	done
 
 fmt: ## Format Go code with the gofmt of the Go version in go.mod (what CI uses)
@@ -108,7 +117,7 @@ test-interop: ## Run the interop suite against the lib60870, OpenMUC and wendy51
 
 interop: test-interop ## Alias for test-interop
 
-check: fmt fmt-check lint lint-ci vet vuln test coverage ## Run format + lint + vet + vuln + test
+check: fmt fmt-check lint lint-ci vet vuln test coverage examples ## Run format + lint + vet + vuln + test
 
 clean: ## Remove generated binaries and coverage artifacts
 	@echo "Cleaning up"
