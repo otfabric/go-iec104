@@ -157,8 +157,11 @@ never selects these types; set `ASDU.Type` explicitly.
 | `F_DR_TA_1` | 126 | Directory | yes | `FileDirectoryEntry` |
 | `F_SC_NB_1` | 127 | Query log, request archive file | yes | `FileQueryLog` |
 
-The types are encoded and decoded; the transfer procedure built from them is
-the application's.
+The types are encoded and decoded. The library runs the transfer procedure
+for download, upload and the directory (`Client.GetFile`, `PutFile`,
+`ListFiles`; `server.FileServer`); file deletion, the spontaneous directory
+and the query log are the application's. See
+[Basic application functions](#basic-application-functions).
 
 ### Private range
 

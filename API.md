@@ -278,7 +278,8 @@ func (g *Group) Interrogate(...)        func (g *Group) CounterInterrogate(...)
 func (g *Group) Read(...)               func (g *Group) ClockSync(...)
 func (g *Group) Command(...)            func (g *Group) Deactivate(...)
 func (g *Group) TestCommand(...)        func (g *Group) ResetProcess(...)
-func (g *Group) Send(...)
+func (g *Group) GetFile(...)            func (g *Group) PutFile(...)
+func (g *Group) ListFiles(...)          func (g *Group) Send(...)
 ```
 
 A `Group` is IEC 60870-5-104's alternative to a connection pool: several
