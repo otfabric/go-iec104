@@ -316,15 +316,12 @@ refused with cause 17, an operator's executed, a viewer's download from a
 go-iec104 station completed), a station that refuses an
 AIM, untrusted certificates on either side and a client without security.
 Where a reference station can do the same, the cB-Sigma client's complete
-result must not tell go-iec104 from it. The cB-Sigma image is not released
-yet: these tests run when `IEC104_INTEROP_CBSIGMA_IMAGE` names a build
-(`make image-cbsigma` in iec104-interop), and were run so for this
-version.
+result must not tell go-iec104 from it.
 
-Besides its own tests the library is run against three independent
+Besides its own tests the library is run against four independent
 implementations, as client and as server, on every push. The reference
 builds are the images of
-[otfabric/iec104-interop v0.2.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.2.0),
+[otfabric/iec104-interop v0.3.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.0),
 pinned by digest:
 
 | Reference | Version | go-iec104 client → reference server | reference client → go-iec104 server |
@@ -332,11 +329,13 @@ pinned by digest:
 | MZ Automation lib60870-C | v2.4.1 | pass | pass |
 | OpenMUC j60870 | 1.7.2 | pass ¹ | pass |
 | wendy512/iec104 on go-iecp5 | v1.0.4 on v1.2.6 | pass ² | pass ² |
+| cB-Sigma/iec60870 | v0.3.0 | pass ³ | pass ³ |
 
 ¹ without file download: the j60870 reference has no file server.
 ² without commands with time tag and without file transfer: go-iecp5 drops
 those types on reception. The suite reads what each reference declares and
 skips what it lacks.
+³ and the IEC 62351-5 cases above, in both directions.
 
 The suite (`make interop`, package `interop`) covers the types of the
 reference fixture: `M_SP`, `M_DP`, `M_ST`, `M_BO`, `M_ME_NA/NB/NC`, `M_IT`

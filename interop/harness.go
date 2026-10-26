@@ -28,20 +28,17 @@ type adapter struct {
 }
 
 // The reference images this version of go-iec104 is qualified against:
-// otfabric/iec104-interop v0.2.0 (lib60870-C v2.4.1, OpenMUC j60870 1.7.2,
-// wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6), pinned by digest so that a run
-// is reproducible. Moving to another release of iec104-interop means changing
-// these constants, and the Makefile and the interop workflow follow.
+// otfabric/iec104-interop v0.3.0 (lib60870-C v2.4.1, OpenMUC j60870 1.7.2,
+// wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, cB-Sigma/iec60870 v0.3.0 with
+// IEC 62351-5), pinned by digest so that a run is reproducible. Moving to
+// another release of iec104-interop means changing these constants, and the
+// Makefile and the interop workflow follow.
 const (
-	interopRelease       = "v0.2.0"
-	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72"
-	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174"
-	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03"
-	// cB-Sigma/iec60870, the only reference with IEC 62351-5, has no
-	// released image yet: it takes part when IEC104_INTEROP_CBSIGMA_IMAGE
-	// names one ("make image-cbsigma" in a checkout of iec104-interop builds
-	// it as ghcr.io/otfabric/iec104-interop-cbsigma:dev).
-	defaultCBSigmaImage = ""
+	interopRelease       = "v0.3.0"
+	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:b135b3c5fd2ec4a0651f33405ba012f14671877962002ee4f448349fc67ce9fb"
+	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:fbb249482ecdd22b4dd93f4599e6bb130d560e0e9ae23b56f5081d0f8deac90e"
+	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:044219110de6e05321413d31f2b4b26b48571a2f30473d207355fedbe5dc27d8"
+	defaultCBSigmaImage  = "ghcr.io/otfabric/iec104-interop-cbsigma@sha256:d19c47207b0963889bd0c57a6e059d407b4fade3f19a574bc4849f636a8db5ad"
 )
 
 // adapters returns the reference implementations to test against. The image
@@ -50,7 +47,7 @@ const (
 //	IEC104_INTEROP_LIB60870_IMAGE, IEC104_INTEROP_OPENMUC_IMAGE,
 //	IEC104_INTEROP_WENDY512_IMAGE, IEC104_INTEROP_CBSIGMA_IMAGE
 //
-// An adapter without an image (cbsigma, until it is released) is left out.
+// An adapter whose image is set to the empty string is left out.
 // IEC104_INTEROP_ADAPTERS restricts the run to a comma-separated subset.
 //
 // The references do not all support the same: a test asks the image what it
@@ -486,7 +483,7 @@ func logReference(t testing.TB, a adapter) {
 		t.Fatalf("%s does not provide both roles", a.image)
 	}
 	t.Logf("%s: iec104-interop %s, %s %s (%s)", a.name, caps.AdapterVersion, caps.Upstream.Name, caps.Upstream.Version, a.image)
-	if a.image == defaultLib60870Image || a.image == defaultOpenMUCImage || a.image == defaultWendy512Image {
+	if a.image == defaultLib60870Image || a.image == defaultOpenMUCImage || a.image == defaultWendy512Image || a.image == defaultCBSigmaImage {
 		if caps.AdapterVersion != interopRelease {
 			t.Errorf("%s is pinned as iec104-interop %s but reports %s", a.name, interopRelease, caps.AdapterVersion)
 		}

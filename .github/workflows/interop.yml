@@ -22,7 +22,7 @@ on:
         description: "wendy512/iec104 reference image (default: the pinned release)"
         required: false
       cbsigma_image:
-        description: "cB-Sigma/iec60870 reference image, with IEC 62351-5 (default: none, not released yet)"
+        description: "cB-Sigma/iec60870 reference image, with IEC 62351-5 (default: the pinned release)"
         required: false
 
 permissions:
@@ -30,18 +30,17 @@ permissions:
   packages: read
 
 env:
-  # otfabric/iec104-interop v0.2.0: lib60870-C v2.4.1, OpenMUC j60870 1.7.2,
-  # wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6.
+  # otfabric/iec104-interop v0.3.0: lib60870-C v2.4.1, OpenMUC j60870 1.7.2,
+  # wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, cB-Sigma/iec60870 v0.3.0.
   # Keep in step with the Makefile and interop/harness.go.
-  IEC104_INTEROP_LIB60870_IMAGE: ${{ inputs.lib60870_image || 'ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72' }}
-  IEC104_INTEROP_OPENMUC_IMAGE: ${{ inputs.openmuc_image || 'ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174' }}
-  IEC104_INTEROP_WENDY512_IMAGE: ${{ inputs.wendy512_image || 'ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03' }}
-  # No released image yet: empty leaves cB-Sigma out of the container suite.
-  IEC104_INTEROP_CBSIGMA_IMAGE: ${{ inputs.cbsigma_image || '' }}
+  IEC104_INTEROP_LIB60870_IMAGE: ${{ inputs.lib60870_image || 'ghcr.io/otfabric/iec104-interop-lib60870@sha256:b135b3c5fd2ec4a0651f33405ba012f14671877962002ee4f448349fc67ce9fb' }}
+  IEC104_INTEROP_OPENMUC_IMAGE: ${{ inputs.openmuc_image || 'ghcr.io/otfabric/iec104-interop-openmuc@sha256:fbb249482ecdd22b4dd93f4599e6bb130d560e0e9ae23b56f5081d0f8deac90e' }}
+  IEC104_INTEROP_WENDY512_IMAGE: ${{ inputs.wendy512_image || 'ghcr.io/otfabric/iec104-interop-wendy512@sha256:044219110de6e05321413d31f2b4b26b48571a2f30473d207355fedbe5dc27d8' }}
+  IEC104_INTEROP_CBSIGMA_IMAGE: ${{ inputs.cbsigma_image || 'ghcr.io/otfabric/iec104-interop-cbsigma@sha256:d19c47207b0963889bd0c57a6e059d407b4fade3f19a574bc4849f636a8db5ad' }}
 
 jobs:
   interop:
-    name: lib60870 + OpenMUC + wendy512, client and server
+    name: lib60870 + OpenMUC + wendy512 + cB-Sigma, client and server
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -55,8 +54,7 @@ jobs:
 
       - name: Pull reference images
         run: |
-          images=("${IEC104_INTEROP_LIB60870_IMAGE}" "${IEC104_INTEROP_OPENMUC_IMAGE}" "${IEC104_INTEROP_WENDY512_IMAGE}")
-          [[ -n "${IEC104_INTEROP_CBSIGMA_IMAGE}" ]] && images+=("${IEC104_INTEROP_CBSIGMA_IMAGE}")
+          images=("${IEC104_INTEROP_LIB60870_IMAGE}" "${IEC104_INTEROP_OPENMUC_IMAGE}" "${IEC104_INTEROP_WENDY512_IMAGE}" "${IEC104_INTEROP_CBSIGMA_IMAGE}")
           # GHCR is occasionally slow or rate limiting: try each pull a few times.
           for image in "${images[@]}"; do
             for attempt in 1 2 3 4 5; do

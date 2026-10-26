@@ -521,19 +521,18 @@ cloned or built here. Scenarios, expected values and assertions live in this
 repository.
 
 This version is qualified against
-[iec104-interop v0.2.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.2.0)
+[iec104-interop v0.3.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.0)
 (lib60870-C v2.4.1, j60870 1.7.2, wendy512/iec104 v1.0.4 on go-iecp5
-v1.2.6). The three images are pinned by digest in `interop/harness.go`, the
-Makefile and the Interop workflow, which runs on every push and pull
-request. To test against another build, set `IEC104_INTEROP_LIB60870_IMAGE`,
-`IEC104_INTEROP_OPENMUC_IMAGE` or `IEC104_INTEROP_WENDY512_IMAGE`; to run
+v1.2.6, cB-Sigma/iec60870 v0.3.0). The four images are pinned by digest in
+`interop/harness.go`, the Makefile and the Interop workflow, which runs on
+every push and pull request. To test against another build, set
+`IEC104_INTEROP_LIB60870_IMAGE`, `IEC104_INTEROP_OPENMUC_IMAGE`,
+`IEC104_INTEROP_WENDY512_IMAGE` or `IEC104_INTEROP_CBSIGMA_IMAGE`; to run
 one stack only, `IEC104_INTEROP_ADAPTERS=lib60870`.
 
-A fourth reference, cB-Sigma/iec60870, takes part when
-`IEC104_INTEROP_CBSIGMA_IMAGE` names its image, which iec104-interop has
-not released yet (`make image-cbsigma` there builds it). It is the only one
-with IEC 62351-5: the suite then runs the scenarios above against it, and
-the application-layer security in both directions (certificates from an
+cB-Sigma/iec60870 is the only reference with IEC 62351-5: the suite runs
+the scenarios above against it, and the application-layer security in both
+directions (certificates from an
 authority and pinned, secp256r1 and X25519, HMAC and AES-256-GCM, role-based
 access control, refused and untrusted stations).
 
