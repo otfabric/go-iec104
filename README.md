@@ -117,7 +117,7 @@ for them and drops them on reception, as it does the file segment
 (F_SG_NA_1) and every type it does not know.
 
 ✅ = available · — = not available or not documented. For lib60870-C
-v2.4.1, j60870 1.7.2 and wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, the
+v2.4.1, j60870 1.8.0 and wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, the
 versions go-iec104 is tested against, from their public sources and
 documentation as of October 2026. If you spot an
 inaccuracy, please [open an issue](https://github.com/otfabric/go-iec104/issues)
@@ -521,8 +521,8 @@ cloned or built here. Scenarios, expected values and assertions live in this
 repository.
 
 This version is qualified against
-[iec104-interop v0.3.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.0)
-(lib60870-C v2.4.1, j60870 1.7.2, wendy512/iec104 v1.0.4 on go-iecp5
+[iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1)
+(lib60870-C v2.4.1, j60870 1.8.0, wendy512/iec104 v1.0.4 on go-iecp5
 v1.2.6, cB-Sigma/iec60870 v0.3.0). The four images are pinned by digest in
 `interop/harness.go`, the Makefile and the Interop workflow, which runs on
 every push and pull request. To test against another build, set
