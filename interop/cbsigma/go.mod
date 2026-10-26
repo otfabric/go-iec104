@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/cB-Sigma/iec60870 v0.3.0
-	github.com/otfabric/go-iec104 v0.0.3
+	github.com/otfabric/go-iec104 v0.0.5
 )
 
 require (
