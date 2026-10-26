@@ -321,13 +321,13 @@ result must not tell go-iec104 from it.
 Besides its own tests the library is run against four independent
 implementations, as client and as server, on every push. The reference
 builds are the images of
-[otfabric/iec104-interop v0.3.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.0),
+[otfabric/iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1),
 pinned by digest:
 
 | Reference | Version | go-iec104 client → reference server | reference client → go-iec104 server |
 |-----------|---------|-------------------------------------|-------------------------------------|
 | MZ Automation lib60870-C | v2.4.1 | pass | pass |
-| OpenMUC j60870 | 1.7.2 | pass ¹ | pass |
+| OpenMUC j60870 | 1.8.0 | pass ¹ ⁴ | pass ⁴ |
 | wendy512/iec104 on go-iecp5 | v1.0.4 on v1.2.6 | pass ² | pass ² |
 | cB-Sigma/iec60870 | v0.3.0 | pass ³ | pass ³ |
 
@@ -336,6 +336,11 @@ pinned by digest:
 those types on reception. The suite reads what each reference declares and
 skips what it lacks.
 ³ and the IEC 62351-5 cases above, in both directions.
+⁴ without read: j60870 1.8.0 cannot decode a read command (C_RD_NA_1) and
+closes the connection on one, as a station on any read and as a controlling
+station on a refused read. The suite treats it as a known bug and fails when
+it no longer reproduces; a fix is proposed upstream in
+[gythialy/j60870#75](https://github.com/gythialy/j60870/pull/75).
 
 The suite (`make interop`, package `interop`) covers the types of the
 reference fixture: `M_SP`, `M_DP`, `M_ST`, `M_BO`, `M_ME_NA/NB/NC`, `M_IT`

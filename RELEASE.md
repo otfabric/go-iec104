@@ -1,5 +1,23 @@
 # go-iec104 Releases
 
+## v0.0.5
+
+**Date:** 2026-10-26
+**Previous release:** v0.0.4
+
+## Summary
+
+The interop suite qualified against iec104-interop v0.3.1, whose OpenMUC
+image is built on j60870 1.8.0.
+
+## Changes
+
+### Changed
+
+- **Interop references: [otfabric/iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1)**, pinned by digest: lib60870-C v2.4.1, j60870 1.8.0, wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6 and cB-Sigma/iec60870 v0.3.0. j60870 1.8.0 closes the connection on a read command; the suite skips the read cases against it as a known bug and fails when the bug no longer reproduces ([INTEROPERABILITY.md](INTEROPERABILITY.md)). The library is unchanged.
+
+---
+
 ## v0.0.4
 
 **Date:** 2026-10-26
