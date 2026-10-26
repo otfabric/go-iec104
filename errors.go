@@ -60,8 +60,9 @@ var (
 )
 
 // NegativeError reports that the controlled station answered a request with
-// a negative confirmation or with one of the "unknown ..." causes of
-// transmission.
+// a negative confirmation, with one of the "unknown ..." causes of
+// transmission, or with [asdu.CauseNotAuthorized] when role-based access
+// control of IEC TS 60870-5-7 refused it.
 type NegativeError struct {
 	// ASDU is the answer of the controlled station.
 	ASDU *asdu.ASDU

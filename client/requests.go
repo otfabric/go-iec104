@@ -107,6 +107,8 @@ func (c *Client) mirrored(req, a *asdu.ASDU) bool {
 			return false
 		}
 	case asdu.CauseUnknownType, asdu.CauseUnknownCause, asdu.CauseUnknownCommonAddr, asdu.CauseUnknownIOA:
+	case asdu.CauseNotAuthorized:
+		// Refused by role-based access control of IEC TS 60870-5-7.
 	default:
 		return false
 	}

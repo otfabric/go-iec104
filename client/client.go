@@ -19,6 +19,7 @@ import (
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/internal/link"
 	"github.com/otfabric/go-iec104/internal/logx"
+	"github.com/otfabric/go-iec104/sec"
 )
 
 // Client is the controlling station end of one IEC 60870-5-104 connection.
@@ -78,6 +79,9 @@ func New(addr string, opts ...Option) (*Client, error) {
 	}
 	if err := o.asduParams.Validate(); err != nil {
 		return nil, err
+	}
+	if o.security != nil && o.security.Role() != sec.Controlling {
+		return nil, fmt.Errorf("%w: a client's security endpoint must have the controlling role", iec104.ErrInvalidOption)
 	}
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		port := apci.DefaultPort
@@ -214,6 +218,8 @@ func (c *Client) connect(ctx context.Context) error {
 			<-ready
 			c.onLinkClose(l, remote, err)
 		},
+		Security: c.security(),
+		NotReady: sec.ErrNotReady,
 	})
 
 	c.mu.Lock()
@@ -236,6 +242,13 @@ func (c *Client) connect(ctx context.Context) error {
 			c.detach(l)
 			_ = l.Close()
 			return fmt.Errorf("%w: STARTDT %s: %w", iec104.ErrConnectFailed, c.addr, err)
+		}
+		if ep := c.opts.security; ep != nil {
+			if err := waitSecure(ctx, ep, l); err != nil {
+				c.detach(l)
+				_ = l.Close()
+				return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, c.addr, err)
+			}
 		}
 	}
 
@@ -265,6 +278,36 @@ func (c *Client) connect(ctx context.Context) error {
 		}()
 	}
 	return nil
+}
+
+// security returns the Security of the links, nil without one: a nil
+// *sec.Endpoint must not become a non-nil interface.
+func (c *Client) security() link.Security {
+	if c.opts.security == nil {
+		return nil
+	}
+	return c.opts.security
+}
+
+// waitSecure waits until ep has a secure session on l, or fails with why it
+// has none.
+func waitSecure(ctx context.Context, ep *sec.Endpoint, l *link.Link) error {
+	for {
+		changed := ep.Changed()
+		if ep.Ready() {
+			return nil
+		}
+		if err := ep.Err(); err != nil {
+			return err
+		}
+		select {
+		case <-changed:
+		case <-l.Done():
+			return l.Err()
+		case <-ctx.Done():
+			return fmt.Errorf("secure session not established: %w", ctx.Err())
+		}
+	}
 }
 
 // at marks a named point for tests; see options.failpoint.

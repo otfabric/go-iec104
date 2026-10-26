@@ -107,6 +107,11 @@ func New(h Handler, opts ...Option) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if o.security != nil {
+		for _, g := range groups {
+			g.assoc = &associations{group: g.name, params: o.asduParams, newEndpoint: o.security}
+		}
+	}
 	srv.groups = groups
 	return srv, nil
 }

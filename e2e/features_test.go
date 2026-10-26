@@ -762,10 +762,24 @@ func stopDuringEventStream(t *testing.T, p apci.Params) {
 			if err := c.StopDT(ctx); err != nil {
 				t.Fatalf("StopDT %d: %v", round, err)
 			}
-			mu.Lock()
-			stopped := len(got)
-			mu.Unlock()
-			time.Sleep(3 * time.Millisecond)
+			// The handler runs on the dispatcher, which may still deliver
+			// what arrived before the confirmation: let it settle, then
+			// nothing more may come.
+			count := func() int {
+				mu.Lock()
+				defer mu.Unlock()
+				return len(got)
+			}
+			stopped := count()
+			for settle := time.Now().Add(time.Second); time.Now().Before(settle); {
+				time.Sleep(5 * time.Millisecond)
+				n := count()
+				if n == stopped {
+					break
+				}
+				stopped = n
+			}
+			time.Sleep(10 * time.Millisecond)
 			mu.Lock()
 			if len(got) != stopped {
 				t.Errorf("round %d: %d events arrived while data transfer was stopped", round, len(got)-stopped)
@@ -1097,7 +1111,8 @@ func TestConnectInTwoSteps(t *testing.T) {
 func TestEveryRequestAtOnce(t *testing.T) {
 	transports(t, func(t *testing.T, l *link) {
 		ctx := context.Background()
-		const clients, rounds = 4, 12
+		const rounds = 12
+		const clients = 4
 		points := len(l.fx.Expected(false))
 		counters := len(l.fx.Expected(true))
 		small, large := l.fx.Files[0], l.fx.Files[len(l.fx.Files)-1]

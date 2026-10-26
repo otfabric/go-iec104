@@ -133,8 +133,15 @@ func TestServerScenarios(t *testing.T) {
 					}
 					args := strings.Fields(sc.args)
 					got := runClient(t, a, st.Addr, args...)
+					readBug := args[0] == "read" && a.knownReadBug(t)
 					if s := got.summary(); s != sc.want {
+						if readBug {
+							t.Skipf("known bug of %s (it cannot decode the mirrored C_RD_NA_1): got %s", a.name, s)
+						}
 						t.Fatalf("%s client against go-iec104:\n got  %s\n want %s", a.name, s, sc.want)
+					}
+					if readBug {
+						t.Skipf("known bug of %s: its server cannot receive a read, so there is nothing to compare with", a.name)
 					}
 
 					other := reference(t, a, sc)

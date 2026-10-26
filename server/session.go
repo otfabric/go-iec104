@@ -15,6 +15,7 @@ import (
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/internal/link"
 	"github.com/otfabric/go-iec104/internal/logx"
+	"github.com/otfabric/go-iec104/sec"
 )
 
 // Session is one connection from a controlling station. It is safe for
@@ -29,7 +30,9 @@ type Session struct {
 	// lk is link for the redundancy group, which is told about data
 	// transfer by the link's protocol goroutine, possibly before newSession
 	// has returned and set link.
-	lk     atomic.Pointer[link.Link]
+	lk atomic.Pointer[link.Link]
+	// sec is the security of the session, nil without security.
+	sec    *route
 	ready  chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -50,7 +53,7 @@ func newSession(srv *Server, conn net.Conn, grp *group) *Session {
 	}
 	o := &srv.opts
 	s.log = srv.log.With("session", s.id, "remote", conn.RemoteAddr().String(), "group", grp.name)
-	s.link = link.New(conn, link.Config{
+	cfg := link.Config{
 		Role:    link.Controlled,
 		Params:  o.params,
 		Log:     s.log,
@@ -88,7 +91,12 @@ func newSession(srv *Server, conn net.Conn, grp *group) *Session {
 		OnClose: func(err error) {
 			s.onClose(err)
 		},
-	})
+	}
+	if grp.assoc != nil {
+		s.sec = &route{set: grp.assoc, log: s.log}
+		cfg.Security, cfg.NotReady = s.sec, sec.ErrNotReady
+	}
+	s.link = link.New(conn, cfg)
 	return s
 }
 
@@ -139,6 +147,12 @@ func (s *Session) onASDU(raw []byte) {
 		s.log.Warn("dropping undecodable ASDU", "error", err)
 		return
 	}
+	if ep := s.Security(); ep != nil && !ep.Permits(a.Type) {
+		ep.Refused(a.Type)
+		s.log.Warn("request not permitted by the roles of the controlling station", "asdu", a.String())
+		_ = s.Reply(a, asdu.CauseNotAuthorized, true)
+		return
+	}
 	if o.commonAddrs != nil && !o.asduParams.IsBroadcast(a.CommonAddr) {
 		if _, ok := o.commonAddrs[a.CommonAddr]; !ok {
 			_ = s.Reject(a, asdu.CauseUnknownCommonAddr)
@@ -156,6 +170,17 @@ func (s *Session) onASDU(raw []byte) {
 		}
 	}()
 	s.srv.handler.HandleASDU(s, a)
+}
+
+// Security returns the association of the controlling station on this
+// session: nil without [WithSecurity], and until the station's first
+// security message has bound the session to its association. Every ASDU a
+// Handler sees has been verified by it.
+func (s *Session) Security() *sec.Endpoint {
+	if s.sec == nil {
+		return nil
+	}
+	return s.sec.endpoint()
 }
 
 // ID returns a number that identifies the session within its server.

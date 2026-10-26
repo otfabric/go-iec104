@@ -209,8 +209,9 @@ func messages(t *testing.T) []*asdu.ASDU {
 	// range and a reserved type.
 	add(&asdu.ASDU{Type: 200, Cause: asdu.CauseSpontaneous, CommonAddr: 9, Raw: []byte{1, 2, 3, 4, 5, 6, 7}, RawCount: 1})
 	add(&asdu.ASDU{Type: 255, Cause: asdu.CauseActivation, CommonAddr: 9, Sequence: true, Raw: bytes.Repeat([]byte{0xEE}, 243), RawCount: 127})
-	// The secure authentication types of IEC 62351-5 are named, not
-	// modelled: they travel as raw payload too, with their own causes.
+	// The security types of IEC TS 60870-5-7 are not modelled by the ASDU
+	// codec: on a connection without the A-Profile they travel as raw
+	// payload too, with their own causes.
 	n := 0
 	for id := 0; id < 256; id++ {
 		typ := asdu.TypeID(id)
@@ -218,11 +219,11 @@ func messages(t *testing.T) []*asdu.ASDU {
 			continue
 		}
 		n++
-		cause := []asdu.Cause{asdu.CauseAuthentication, asdu.CauseSessionKey, asdu.CauseUserRoleUpdateKey}[n%3]
+		cause := []asdu.Cause{asdu.CauseDataProtection, asdu.CauseSessionKey, asdu.CauseAssociation}[n%3]
 		add(&asdu.ASDU{Type: typ, Cause: cause, CommonAddr: 9, Raw: bytes.Repeat([]byte{byte(id)}, 10+n), RawCount: 1})
 	}
-	if n != 14 {
-		t.Fatalf("%d security types in the matrix, want 14", n)
+	if n != 10 {
+		t.Fatalf("%d security types in the matrix, want 10", n)
 	}
 	return out
 }
