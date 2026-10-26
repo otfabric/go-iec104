@@ -9,6 +9,7 @@ import (
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
+	"github.com/otfabric/go-iec104/sec"
 )
 
 // Option configures a [Server].
@@ -26,6 +27,7 @@ type options struct {
 	commonAddrs map[asdu.CommonAddr]struct{}
 	accept      func(remote net.Addr) bool
 	onState     func(s *Session, state iec104.State, err error)
+	security    func(group string, aim uint16) (*sec.Endpoint, error)
 }
 
 func defaultOptions() options {
@@ -102,4 +104,30 @@ func WithAccept(f func(remote net.Addr) bool) Option {
 // goroutine, in protocol order.
 func WithStateHandler(f func(s *Session, state iec104.State, err error)) Option {
 	return func(o *options) { o.onState = f }
+}
+
+// WithSecurity applies the application-layer security of IEC 62351-5
+// (IEC TS 60870-5-7) to every connection.
+//
+// The station keeps one association per controlling station, which names
+// itself by the AIM in every security message. newEndpoint makes the
+// association when a controlling station is first heard in a redundancy
+// group ("default" without [WithRedundancyGroups]); it must return an
+// endpoint with the role sec.Controlled, or an error to refuse that AIM.
+// Give each AIM a sec.Trust that accepts only that station's certificate
+// (sec.Trust.Subjects or a pinned certificate), and the sec.Config.Roles
+// it may exercise. The connections of one controlling station in a group
+// (a client redundancy group) share its association, carried by the one
+// with data transfer started; other controlling stations have their own.
+// A connection is bound to an association by the first security message
+// it carries; until then the station sends nothing on it.
+//
+// With security, an ASDU that is not protected is discarded, the
+// [Handler] sees only the verified application data, and what the station
+// sends waits until the controlling station has established a session. A
+// request that the roles of the association do not permit is answered with
+// a negative confirmation with cause [asdu.CauseNotAuthorized] before it
+// reaches the Handler. Security can be combined with [WithTLS].
+func WithSecurity(newEndpoint func(group string, aim uint16) (*sec.Endpoint, error)) Option {
+	return func(o *options) { o.security = newEndpoint }
 }

@@ -21,6 +21,9 @@ on:
       wendy512_image:
         description: "wendy512/iec104 reference image (default: the pinned release)"
         required: false
+      cbsigma_image:
+        description: "cB-Sigma/iec60870 reference image, with IEC 62351-5 (default: none, not released yet)"
+        required: false
 
 permissions:
   contents: read
@@ -33,6 +36,8 @@ env:
   IEC104_INTEROP_LIB60870_IMAGE: ${{ inputs.lib60870_image || 'ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72' }}
   IEC104_INTEROP_OPENMUC_IMAGE: ${{ inputs.openmuc_image || 'ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174' }}
   IEC104_INTEROP_WENDY512_IMAGE: ${{ inputs.wendy512_image || 'ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03' }}
+  # No released image yet: empty leaves cB-Sigma out of the container suite.
+  IEC104_INTEROP_CBSIGMA_IMAGE: ${{ inputs.cbsigma_image || '' }}
 
 jobs:
   interop:
@@ -51,6 +56,7 @@ jobs:
       - name: Pull reference images
         run: |
           images=("${IEC104_INTEROP_LIB60870_IMAGE}" "${IEC104_INTEROP_OPENMUC_IMAGE}" "${IEC104_INTEROP_WENDY512_IMAGE}")
+          [[ -n "${IEC104_INTEROP_CBSIGMA_IMAGE}" ]] && images+=("${IEC104_INTEROP_CBSIGMA_IMAGE}")
           # GHCR is occasionally slow or rate limiting: try each pull a few times.
           for image in "${images[@]}"; do
             for attempt in 1 2 3 4 5; do
@@ -87,3 +93,17 @@ jobs:
           name: interop-logs
           path: artifacts/
           if-no-files-found: ignore
+
+  # The application-layer security (IEC 62351-5) against cB-Sigma/iec60870,
+  # in process: interop/cbsigma is a module of its own, so that go-iec104
+  # keeps no dependencies, and cB-Sigma needs Go 1.26.
+  cbsigma:
+    name: cB-Sigma (IEC 62351-5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: interop/cbsigma/go.sum
+      - run: make test-cbsigma

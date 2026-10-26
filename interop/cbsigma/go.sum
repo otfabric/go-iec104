@@ -1,0 +1,16 @@
+github.com/cB-Sigma/iec60870 v0.3.0 h1:F+7QLjLwCrRmg9QEBUVqMzs8jILl8EteG1v7ZxlIhYM=
+github.com/cB-Sigma/iec60870 v0.3.0/go.mod h1:NHUbkkWU9BnkEdlvJaws/jDWByWCwTkfcUmcCoSqSC0=
+github.com/cB-Sigma/iotcrypto v0.1.0 h1:dpW2jpBcwkug0bTz2qOvH7lp+rp+6eJxmugChP7f5tQ=
+github.com/cB-Sigma/iotcrypto v0.1.0/go.mod h1:SlKPoP00OgqfMJpaa+fNq0aqcoFhGU3NpyKCJ7UtR4g=
+github.com/cB-Sigma/iotsec v0.1.0 h1:mAFVyYLDXR7o9aVSJf6h4P9vGkWdYTPV320+FLUPGJ8=
+github.com/cB-Sigma/iotsec v0.1.0/go.mod h1:r/0dobvN6ZcFveUSnv2rSd7gmAzGUCcLZJUXGYMQsXI=
+github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
+github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
+github.com/decred/dcrd/crypto/blake256 v1.1.0 h1:zPMNGQCm0g4QTY27fOCorQW7EryeQ/U0x++OzVrdms8=
+github.com/decred/dcrd/crypto/blake256 v1.1.0/go.mod h1:2OfgNZ5wDpcsFmHmCK5gZTPcCXqlm2ArzUIkw9czNJo=
+github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 h1:NMZiJj8QnKe1LgsbDayM4UoHwbvwDRwnI3hwNaAHRnc=
+github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0/go.mod h1:ZXNYxsqcloTdSy/rNShjYzMhyjf0LaoftYK0p+A3h40=
+golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
+golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
+golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
+golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=

@@ -81,6 +81,8 @@ type group struct {
 	// hold the queue when another has become the active one.
 	sending    *Session
 	cancelSend context.CancelFunc
+	// assoc are the associations of the group, nil without security.
+	assoc *associations
 }
 
 func newGroups(srv *Server, decl []RedundancyGroup, limit int) ([]*group, error) {

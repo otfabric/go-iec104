@@ -37,14 +37,20 @@ const (
 	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72"
 	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174"
 	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03"
+	// cB-Sigma/iec60870, the only reference with IEC 62351-5, has no
+	// released image yet: it takes part when IEC104_INTEROP_CBSIGMA_IMAGE
+	// names one ("make image-cbsigma" in a checkout of iec104-interop builds
+	// it as ghcr.io/otfabric/iec104-interop-cbsigma:dev).
+	defaultCBSigmaImage = ""
 )
 
 // adapters returns the reference implementations to test against. The image
 // of each can be overridden, for example to try a local build or a candidate:
 //
 //	IEC104_INTEROP_LIB60870_IMAGE, IEC104_INTEROP_OPENMUC_IMAGE,
-//	IEC104_INTEROP_WENDY512_IMAGE
+//	IEC104_INTEROP_WENDY512_IMAGE, IEC104_INTEROP_CBSIGMA_IMAGE
 //
+// An adapter without an image (cbsigma, until it is released) is left out.
 // IEC104_INTEROP_ADAPTERS restricts the run to a comma-separated subset.
 //
 // The references do not all support the same: a test asks the image what it
@@ -55,18 +61,26 @@ func adapters(t testing.TB) []adapter {
 		{"lib60870", getenv("IEC104_INTEROP_LIB60870_IMAGE", defaultLib60870Image)},
 		{"openmuc", getenv("IEC104_INTEROP_OPENMUC_IMAGE", defaultOpenMUCImage)},
 		{"wendy512", getenv("IEC104_INTEROP_WENDY512_IMAGE", defaultWendy512Image)},
+		{"cbsigma", getenv("IEC104_INTEROP_CBSIGMA_IMAGE", defaultCBSigmaImage)},
 	}
 	only := os.Getenv("IEC104_INTEROP_ADAPTERS")
-	if only == "" {
-		return all
-	}
 	var out []adapter
 	for _, a := range all {
+		selected := only == ""
 		for _, want := range strings.Split(only, ",") {
-			if strings.TrimSpace(want) == a.name {
-				out = append(out, a)
-			}
+			selected = selected || strings.TrimSpace(want) == a.name
 		}
+		switch {
+		case !selected:
+		case a.image != "":
+			out = append(out, a)
+		case only != "":
+			t.Fatalf("IEC104_INTEROP_ADAPTERS selects %s, which has no image: set IEC104_INTEROP_%s_IMAGE",
+				a.name, strings.ToUpper(a.name))
+		}
+	}
+	if only == "" {
+		return out
 	}
 	if len(out) == 0 {
 		t.Fatalf("IEC104_INTEROP_ADAPTERS=%q selects no adapter", only)
@@ -120,6 +134,7 @@ const (
 	featDataTransferEvents = "dataTransferEvents"
 	featFileServer         = "fileServer"
 	featFileClient         = "fileClient"
+	featSecure             = "secureAuthentication"
 )
 
 // has reports whether the image declares a feature. A feature an image does
@@ -177,11 +192,18 @@ type refServer struct {
 // parameters, for example).
 func startServer(t testing.TB, a adapter, extra ...string) *refServer {
 	t.Helper()
+	return startServerWith(t, a, nil, extra...)
+}
+
+// startServerWith is startServer with further "docker run" arguments, such
+// as a mount.
+func startServerWith(t testing.TB, a adapter, dockerArgs []string, extra ...string) *refServer {
+	t.Helper()
 	// A fixed host port keeps the address stable across "docker restart".
 	port := freePort(t)
 	name := fmt.Sprintf("go-iec104-interop-%s-%d-%d", a.name, os.Getpid(), containerSeq.Add(1))
-	args := append([]string{"run", "-d", "--name", name,
-		"-p", fmt.Sprintf("127.0.0.1:%d:2404", port), a.image, "server"}, extra...)
+	args := append([]string{"run", "-d", "--name", name, "-p", fmt.Sprintf("127.0.0.1:%d:2404", port)}, dockerArgs...)
+	args = append(append(args, a.image, "server"), extra...)
 	if _, stderr, err := docker(args...); err != nil {
 		t.Fatalf("start %s server: %v\n%s", a.name, err, stderr)
 	}
@@ -284,7 +306,8 @@ type result struct {
 		Cot      int  `json:"cot"`
 		Negative bool `json:"negative"`
 	} `json:"confirmations"`
-	ASDUs []resultASDU `json:"asdus"`
+	ASDUs   []resultASDU `json:"asdus"`
+	Secured *bool        `json:"secured"`
 
 	exit int
 	raw  map[string]any
@@ -326,7 +349,10 @@ func (r *result) summary() string {
 }
 
 // normalized returns the document without what legitimately differs between
-// two runs: who answered, how long it took and wall-clock time tags.
+// two runs: who answered, how long it took, wall-clock time tags, and the
+// NOS of the F_LS_NA_1 that ends a file (LSQ 1 or 2), which lib60870 and
+// go-iec104 send as one more than the number of sections and cB-Sigma as the
+// number of the last section.
 func (r *result) normalized() string {
 	doc := map[string]any{}
 	for k, v := range r.raw {
@@ -337,8 +363,13 @@ func (r *result) normalized() string {
 	if asdus, ok := doc["asdus"].([]any); ok {
 		for _, a := range asdus {
 			objs, _ := a.(map[string]any)["objects"].([]any)
+			lastSection := a.(map[string]any)["type"] == "F_LS_NA_1"
 			for _, o := range objs {
-				delete(o.(map[string]any), "time")
+				obj := o.(map[string]any)
+				delete(obj, "time")
+				if lsq := obj["lsq"]; lastSection && (lsq == 1.0 || lsq == 2.0) {
+					delete(obj, "nos")
+				}
 			}
 		}
 	}
@@ -351,6 +382,13 @@ func (r *result) normalized() string {
 // document.
 func runClient(t testing.TB, a adapter, addr string, args ...string) *result {
 	t.Helper()
+	return runClientWith(t, a, addr, nil, args...)
+}
+
+// runClientWith is runClient with further "docker run" arguments, such as a
+// mount.
+func runClientWith(t testing.TB, a adapter, addr string, dockerArgs []string, args ...string) *result {
+	t.Helper()
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +397,7 @@ func runClient(t testing.TB, a adapter, addr string, args ...string) *result {
 	// gateway alias, on Docker Desktop and on Linux alike. The server must
 	// listen on all interfaces for that: on Linux the alias is the bridge
 	// address, not loopback.
-	return execClient(t, a, []string{"--add-host=host.docker.internal:host-gateway"},
+	return execClient(t, a, append([]string{"--add-host=host.docker.internal:host-gateway"}, dockerArgs...),
 		append(args, "--host", "host.docker.internal", "--port", port))
 }
 
@@ -369,7 +407,14 @@ func runClient(t testing.TB, a adapter, addr string, args ...string) *result {
 // which a container cannot reach on Linux.
 func runClientAgainst(t testing.TB, a adapter, srv *refServer, args ...string) *result {
 	t.Helper()
-	return execClient(t, a, []string{"--network", "container:" + srv.name},
+	return runClientAgainstWith(t, a, srv, nil, args...)
+}
+
+// runClientAgainstWith is runClientAgainst with further "docker run"
+// arguments, such as a mount.
+func runClientAgainstWith(t testing.TB, a adapter, srv *refServer, dockerArgs []string, args ...string) *result {
+	t.Helper()
+	return execClient(t, a, append([]string{"--network", "container:" + srv.name}, dockerArgs...),
 		append(args, "--host", "127.0.0.1", "--port", "2404"))
 }
 

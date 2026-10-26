@@ -34,6 +34,10 @@ INTEROP_TAGS := interop
 IEC104_INTEROP_LIB60870_IMAGE ?= ghcr.io/otfabric/iec104-interop-lib60870@sha256:c2f6df54d5b0bdda0411db7ad601b77e320d8d628e6988cd1c7d507f4e56ba72
 IEC104_INTEROP_OPENMUC_IMAGE  ?= ghcr.io/otfabric/iec104-interop-openmuc@sha256:8c2c697ce035f13333204e3bd2b1d06b699239545c737975609875264179e174
 IEC104_INTEROP_WENDY512_IMAGE ?= ghcr.io/otfabric/iec104-interop-wendy512@sha256:d007361f49e6c289487c918938b06a847d7a07f4207f2f2271186c9de09d0f03
+# cB-Sigma/iec60870, the reference with IEC 62351-5, has no released image
+# yet: empty leaves it out. "make image-cbsigma" in iec104-interop builds
+#   make interop IEC104_INTEROP_CBSIGMA_IMAGE=ghcr.io/otfabric/iec104-interop-cbsigma:dev
+IEC104_INTEROP_CBSIGMA_IMAGE  ?=
 
 all: build ## Default target: build the examples
 
@@ -46,7 +50,7 @@ build: ## Build the example client and server into ./bin
 	done
 
 # The self-contained examples: each starts both sides and exits by itself.
-RUN_EXAMPLES := quickstart commands files events redundancy tls observability
+RUN_EXAMPLES := quickstart commands files events redundancy tls secure observability
 
 examples: ## Run the self-contained examples (each must exit successfully)
 	@for e in $(RUN_EXAMPLES); do \
@@ -107,15 +111,21 @@ fuzz: ## Run the codec fuzz targets for FUZZTIME each (default 30s)
 	@echo "Fuzzing (FUZZTIME=$(FUZZTIME))"
 	@go test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=$(FUZZTIME) ./apci
 	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./asdu
+	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./sec
 
-test-interop: ## Run the interop suite against the lib60870, OpenMUC and wendy512 reference images (needs Docker)
-	@echo "Running interop tests against $(IEC104_INTEROP_LIB60870_IMAGE), $(IEC104_INTEROP_OPENMUC_IMAGE) and $(IEC104_INTEROP_WENDY512_IMAGE)"
+test-interop: ## Run the interop suite against the lib60870, OpenMUC and wendy512 reference images, and cB-Sigma when IEC104_INTEROP_CBSIGMA_IMAGE is set (needs Docker)
+	@echo "Running interop tests against $(IEC104_INTEROP_LIB60870_IMAGE), $(IEC104_INTEROP_OPENMUC_IMAGE) and $(IEC104_INTEROP_WENDY512_IMAGE) $(IEC104_INTEROP_CBSIGMA_IMAGE)"
 	@IEC104_INTEROP_LIB60870_IMAGE="$(IEC104_INTEROP_LIB60870_IMAGE)" \
 		IEC104_INTEROP_OPENMUC_IMAGE="$(IEC104_INTEROP_OPENMUC_IMAGE)" \
 		IEC104_INTEROP_WENDY512_IMAGE="$(IEC104_INTEROP_WENDY512_IMAGE)" \
+		IEC104_INTEROP_CBSIGMA_IMAGE="$(IEC104_INTEROP_CBSIGMA_IMAGE)" \
 		go test -tags=$(INTEROP_TAGS) -count=1 -timeout=20m ./interop/...
 
 interop: test-interop ## Alias for test-interop
+
+test-cbsigma: ## Run the IEC 62351-5 differential tests against cB-Sigma/iec60870 (a module of its own, needs Go 1.26)
+	@echo "Running the application-layer security tests against cB-Sigma/iec60870"
+	@cd interop/cbsigma && go test -count=1 -race ./...
 
 check: fmt fmt-check lint lint-ci vet vuln test coverage examples ## Run format + lint + vet + vuln + test
 

@@ -11,6 +11,7 @@ import (
 	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
+	"github.com/otfabric/go-iec104/sec"
 )
 
 // Handler receives the ASDUs the controlled station sends.
@@ -73,6 +74,7 @@ type options struct {
 	// belong together. Tests only.
 	failpoint      func(name string)
 	requestTimeout time.Duration
+	security       *sec.Endpoint
 }
 
 func defaultOptions() options {
@@ -139,6 +141,22 @@ func WithMetrics(m iec104.Metrics) Option {
 // connection the dialer returns.
 func WithDialer(d Dialer) Option {
 	return func(o *options) { o.dialer = d }
+}
+
+// WithSecurity applies the application-layer security of IEC 62351-5
+// (IEC TS 60870-5-7) to the connection: ep, which must have the role
+// sec.Controlling, runs the Station Association and the Session Key Change
+// when data transfer starts, and from then on every ASDU travels as Secure
+// Data. [Client.Connect] returns once the secure session is established, or
+// fails with the reason it could not be. Requests sent before that wait for
+// it, within their timeout.
+//
+// The clients of a [Group] serve one controlled station and share one
+// Endpoint: the station keeps one association per controlling station, and
+// the connection with data transfer started carries it. Security can be
+// combined with [WithTLS].
+func WithSecurity(ep *sec.Endpoint) Option {
+	return func(o *options) { o.security = ep }
 }
 
 // WithTLS secures the connection with TLS as profiled by IEC 62351-3. The

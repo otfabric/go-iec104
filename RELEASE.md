@@ -1,5 +1,60 @@
 # go-iec104 Releases
 
+## v0.0.4
+
+**Date:** 2026-10-26
+**Previous release:** v0.0.3
+
+## Summary
+
+Application-layer security: the A-Profile of IEC 62351-5:2023 as
+IEC TS 60870-5-7:2025 applies it to IEC 60870-5-104, in the new package
+`sec`, switched on with `client.WithSecurity` and `server.WithSecurity`.
+Station Association with X.509 certificates, session keys, every ASDU
+authenticated or encrypted, role-based access control and the security
+statistics, with or without TLS. Interoperable with cB-Sigma/iec60870, the
+open-source implementation the formats were derived from; the IEC documents
+were not used. One breaking change in `asdu`: the security type
+identifications and causes are those of the 2025 edition.
+
+**Upgrade notes**
+
+- `asdu.S_CH_NA_1` .. `asdu.S_UC_NA_1` and `asdu.S_IT_TC_1` (the 2013 edition) are replaced by `asdu.S_AQ_NA_1` .. `asdu.S_KP_NA_1` and `asdu.S_SD_NA_1` (the 2025 edition), which use the same numbers 81..91 differently. `asdu.CauseAuthentication` and `asdu.CauseUserRoleUpdateKey` are replaced by `asdu.CauseDataProtection` (14) and `asdu.CauseAssociation` (16); `asdu.CauseSessionKey` (15) stays, `asdu.CauseNotAuthorized` (17) is new. Code that only printed these types needs nothing.
+
+## Changes
+
+### Added
+
+- **Package `sec`**, the A-Profile of IEC 62351-5 with IEC TS 60870-5-7, as a sans-IO `Endpoint` for either station role:
+  - Station Association: certificates exchanged and checked against a `Trust` (pinned self-signed certificates or public keys, or Central Authorities with an optional list of subjects), ECDH on secp256r1 or Curve25519, HKDF;
+  - Session Key Change with AES-256 key wrap, at every connection, after `Settings.KeyLifetime` or `KeyUses`, on `Endpoint.Renew`; the Session Initiation Request of a controlled station whose keys are not valid;
+  - Secure Data under HMAC-SHA-256 (16 or 8 octets), HMAC-SHA3-256 (built with Go 1.24 or later) or AES-256-GCM, with sequence numbers against replay, and segmentation of long security messages;
+  - retransmission, reply and request timeouts, failure with backoff, and a Station Association anew after a failed Session Key Change;
+  - the security statistics and events of IEC 62351-5 (`Endpoint.Statistics`, `Config.OnEvent`), `Endpoint.Status`;
+  - role-based access control with the seven roles of IEC TS 60870-5-7 (`Config.Roles`); the acknowledgement of a download needs file read, where cB-Sigma asks for file write (see INTEROPERABILITY.md);
+  - identities from PEM files (`LoadIdentity`) or made for tests and provisioning (`NewIdentity`, Curve25519 certificates included), and `FileStore`, which keeps an association over a restart;
+  - the codec of the ten security messages (`Encode`, `Decode`, `Segment`, `AssociationOf`) for tools and tests.
+- **`client.WithSecurity` and `server.WithSecurity`.** The client runs the key management when data transfer starts and `Connect` returns once the secure session is established; requests wait for it. The server keeps one association per controlling station: its factory makes the endpoint for an AIM when that station is first heard, or refuses it, and a connection is bound to its station's association by the first security message on it. The connections of a client redundancy group share their station's association; other controlling stations keep theirs. The server discards unprotected ASDUs and answers a request the roles do not permit with a negative confirmation with cause "not authorized" before it reaches the handler. `Session.Security` returns the association of the session's controlling station. Both combine with TLS.
+- `asdu.CauseNotAuthorized` (17), `asdu.CauseDataProtection` (14) and `asdu.CauseAssociation` (16), with names; the 2025 security types (see "Upgrade notes").
+- **`examples/secure`**: an association with certificates of a plant authority, AES-256-GCM, and a command refused by role.
+- **`interop/cbsigma`**, a module of its own so that go-iec104 keeps no dependencies: `sec` against cB-Sigma/iec60870 in process (`make test-cbsigma`, and a job in the Interop workflow).
+- **Interop suite: cB-Sigma/iec60870 as a fourth reference image** with IEC 62351-5 (`IEC104_INTEROP_CBSIGMA_IMAGE`; left out while it is unset, since iec104-interop has not released the image), and `interop/secure_test.go`, the application-layer security in both directions against every reference that declares `secureAuthentication`. Result documents are compared without the NOS of the F_LS_NA_1 that ends a file, which cB-Sigma fills differently from lib60870 and go-iec104.
+
+### Changed
+
+- The client reports a refusal with cause "not authorized" (17) as `*iec104.NegativeError`, like the "unknown ..." causes; before, such an answer was not taken for the answer of the request.
+
+### Verification
+
+- Unit tests of `sec`, 95% of its statements: the encodings checked against octet strings produced by cB-Sigma/iec60870's encoder, RFC 3394 and RFC 5869 vectors; two endpoints on a simulated connection with a clock of their own, through every procedure and the retransmission, timeout, failure and backoff of each, tampered and replayed messages, unprotected ASDUs, duplicate requests, restarts with a kept association, a Session Initiation Request crossing a Session Request, a controlled station reconnecting to a controlling station that kept its keys, refused certificates (untrusted, expired, other curve, other authority, bad signature, subject not listed) and refused algorithms. A fuzz target for the decoder and both endpoint roles.
+- Against cB-Sigma/iec60870 v0.3.0 (`interop/cbsigma`): the encodings and segments of every message compared, and complete associations with go-iec104 in either role and every data protection algorithm both have (MAL 3 and 4, HMAC-SHA3-256, AES-256-GCM): data both ways, short and segmented, renewal by the controlling station, a restart of either side with its association kept, a reconnect, crossing requests, and Curve25519 station certificates issued by an authority on each side.
+- End to end (`e2e`): the station scenarios run also with the A-Profile, HMAC over TCP and AES-256-GCM over TLS, each client a controlling station of its own, eight of them at once included; a client redundancy group shares its association over a switchover while another controlling station keeps its own; a station refuses an AIM its factory does not know; and role-based access control refuses commands and file delivery to a viewer while it interrogates, lists files and downloads one to its acknowledgement.
+- Found and fixed on the way, before release: a request held while the session keys changed was sent only at the next change when the keys arrived while the protocol loop was busy; a station certificate whose subject equals its authority's (both empty) was taken for self-signed; a repeated first segment of a security message abandoned the series; and what a controlled station sent after a reconnect, under keys the controlling station had dropped, was lost.
+- Against the cB-Sigma/iec60870 v0.3.0 image of iec104-interop (container contract 1.2, built locally, not yet released; `IEC104_INTEROP_CBSIGMA_IMAGE`): every scenario of the interop suite in both directions, and the A-Profile through the security flags: go-iec104's client against the cB-Sigma station and the cB-Sigma client against a go-iec104 station, with authority-issued and pinned certificates, secp256r1 and X25519, HMAC-SHA-256 and AES-256-GCM, other association identities, a viewer's command refused with cause 17 and an operator's executed, a viewer's download from a go-iec104 station completed (cB-Sigma's station refuses its acknowledgement), an AIM the station refuses, untrusted certificates on either side and a client without security. The cB-Sigma client's results against go-iec104 equal those against the cB-Sigma station.
+- Not verified: against a third, independent implementation or certified test equipment.
+
+---
+
 ## v0.0.3
 
 **Date:** 2026-10-10

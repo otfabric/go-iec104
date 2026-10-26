@@ -3,7 +3,7 @@
 Runnable programs to start from. Each is one `main.go` that uses only the
 public API.
 
-The first seven are self-contained: they start a station and a controlling
+The first eight are self-contained: they start a station and a controlling
 station in one process, connected over TCP on loopback, so `go run` shows
 the whole exchange and there is nothing to set up.
 
@@ -15,6 +15,7 @@ the whole exchange and there is nothing to set up.
 | [events](events/main.go) | Reporting on the station's own initiative: the event queue (`Enqueue`, `Pending`), `Broadcast` for cyclic data, end of initialization from a state handler | `go run ./examples/events` |
 | [redundancy](redundancy/main.go) | A redundancy group over two paths: one connection started, `Switchover`, automatic failover, the switch handler | `go run ./examples/redundancy` |
 | [tls](tls/main.go) | TLS with certificates on both sides (IEC 62351-3): a station that only accepts its authority's control centres and reads who is calling | `go run ./examples/tls` |
+| [secure](secure/main.go) | Application-layer security (IEC 62351-5): a Station Association with certificates of a plant authority, AES-256-GCM Secure Data, a command refused by role-based access control | `go run ./examples/secure` |
 | [observability](observability/main.go) | `slog` logging, state handlers and metrics on both sides; request timeout, retries, reconnect and the start handler | `go run ./examples/observability` |
 
 The last two are a station and a controlling station as separate programs,

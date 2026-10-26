@@ -5,9 +5,11 @@ package e2e_test
 import (
 	"bytes"
 	"context"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/otfabric/go-iec104/client"
 	"github.com/otfabric/go-iec104/internal/station"
 	"github.com/otfabric/go-iec104/internal/testutil"
+	"github.com/otfabric/go-iec104/sec"
 	"github.com/otfabric/go-iec104/server"
 )
 
@@ -66,6 +69,11 @@ type link struct {
 	fx   *station.Fixture
 	ca   asdu.CommonAddr
 	opts []client.Option
+	// secure, when set, gives each client dialled through the link a
+	// controlling station of its own under the A-Profile of IEC 62351-5:
+	// an endpoint with the next AIM, and so its own association at the
+	// station.
+	secure func(t testing.TB) client.Option
 }
 
 func (l *link) dial(t testing.TB, opts ...client.Option) *client.Client {
@@ -73,6 +81,9 @@ func (l *link) dial(t testing.TB, opts ...client.Option) *client.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	all := append([]client.Option{client.WithRequestTimeout(5 * time.Second)}, l.opts...)
+	if l.secure != nil {
+		all = append(all, l.secure(t))
+	}
 	c, err := client.Dial(ctx, l.st.Loopback(), append(all, opts...)...)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -104,6 +115,62 @@ func transports(t *testing.T, f func(t *testing.T, l *link)) {
 		p.K, p.W = 1, 1
 		f(t, start(t, []server.Option{server.WithParams(p)}, client.WithParams(p)))
 	})
+	t.Run("secure", func(t *testing.T) {
+		fx := station.Baseline(t)
+		srv, cli, ep := secureOptions(t, fx.Station.CommonAddr, sec.HMACSHA256.Code)
+		f(t, &link{st: station.Start(t, fx, srv...), fx: fx, ca: fx.Station.CommonAddr, opts: cli, secure: ep})
+	})
+	t.Run("secure-gcm-tls", func(t *testing.T) {
+		fx := station.Baseline(t)
+		srv, cli, ep := secureOptions(t, fx.Station.CommonAddr, sec.AES256GCM)
+		srvTLS, cliTLS := testutil.TLSConfigs(t)
+		f(t, &link{st: station.StartTLS(t, fx, srvTLS, srv...), fx: fx, ca: fx.Station.CommonAddr,
+			opts: append(cli, client.WithTLS(cliTLS)), secure: ep})
+	})
+}
+
+// secureOptions configures the A-Profile with pinned self-signed
+// certificates and data protection dpa: the station's options, the
+// clients' options, and a factory of controlling stations, each with an
+// AIM of its own (7, 8, ...) and the same certificate. srvMod, when given,
+// changes the configuration of the station's association for aim, or
+// refuses that station with an error.
+func secureOptions(t testing.TB, ca asdu.CommonAddr, dpa uint8, srvMod ...func(aim uint16, c *sec.Config) error) ([]server.Option, []client.Option, func(testing.TB) client.Option) {
+	t.Helper()
+	srvID, err := sec.NewIdentity(sec.IdentityOptions{Subject: pkix.Name{CommonName: "station"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliID, err := sec.NewIdentity(sec.IdentityOptions{Subject: pkix.Name{CommonName: "scada"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := sec.Settings{ReplyTimeout: time.Second, RequestTimeout: 3 * time.Second}
+	// Short T2: the key management frames shift the count of I frames,
+	// and acknowledgements should not wait for the default ten seconds.
+	params := testutil.Params()
+	srv := server.WithSecurity(func(_ string, aim uint16) (*sec.Endpoint, error) {
+		cfg := sec.Config{Role: sec.Controlled, AssociationID: 9, Identity: srvID, Trust: cliID.Pin(),
+			CommonAddr: ca, Settings: settings}
+		for _, m := range srvMod {
+			if err := m(aim, &cfg); err != nil {
+				return nil, err
+			}
+		}
+		return sec.New(cfg)
+	})
+	var aim atomic.Uint32
+	aim.Store(6)
+	controlling := func(t testing.TB) client.Option {
+		t.Helper()
+		ep, err := sec.New(sec.Config{Role: sec.Controlling, AssociationID: uint16(aim.Add(1)), Identity: cliID,
+			Trust: srvID.Pin(), CommonAddr: ca, DataProtection: dpa, Settings: settings})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client.WithSecurity(ep)
+	}
+	return []server.Option{srv, server.WithParams(params)}, []client.Option{client.WithParams(params)}, controlling
 }
 
 func negative(t testing.TB, err error, want asdu.Cause) {
@@ -860,7 +927,8 @@ func TestFileUploadAndDirectory(t *testing.T) {
 		negative(t, c.PutFile(ctx, l.ca, 100, 3, []byte("x")), asdu.CauseUnknownIOA)
 		negative(t, c.PutFile(ctx, l.ca+6, station.FirstUploadIOA, 3, []byte("x")), asdu.CauseUnknownCommonAddr)
 
-		// Another controlling station sees them in the directory and fetches them.
+		// Another controlling station sees them in the directory and fetches
+		// them.
 		other := l.dial(t)
 		dir, err = other.ListFiles(ctx, l.ca, 0)
 		if err != nil || len(dir) != len(l.fx.Files)+len(uploads) {
@@ -912,4 +980,134 @@ func TestFileUploadAndDirectory(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+// Role-based access control of IEC TS 60870-5-7: a controlling station with
+// the VIEWER role may interrogate and read files, not operate.
+func TestSecurityRoles(t *testing.T) {
+	fx := station.Baseline(t)
+	srv, cli, ep := secureOptions(t, fx.Station.CommonAddr, sec.AES256GCM, func(_ uint16, c *sec.Config) error {
+		c.Roles = []sec.AccessRole{sec.RoleViewer}
+		return nil
+	})
+	l := &link{st: station.Start(t, fx, srv...), fx: fx, ca: fx.Station.CommonAddr, opts: cli, secure: ep}
+	c := l.dial(t)
+	ctx := context.Background()
+	if data, err := c.Interrogate(ctx, l.ca, asdu.QOIStation); err != nil || len(data) == 0 {
+		t.Errorf("Interrogate: %d ASDUs, %v", len(data), err)
+	}
+	if _, err := c.ListFiles(ctx, l.ca, 0); err != nil {
+		t.Errorf("ListFiles: %v", err)
+	}
+	// A download to its acknowledgement of the file.
+	f := fx.Files[0]
+	if got, err := c.GetFile(ctx, l.ca, f.IOA, f.Name); err != nil || !bytes.Equal(got, f.Content()) {
+		t.Errorf("GetFile: %d octets, %v", len(got), err)
+	}
+	negative(t, c.Command(ctx, l.ca, asdu.SingleCommand{IOA: 500, Value: true}), asdu.CauseNotAuthorized)
+	negative(t, c.PutFile(ctx, l.ca, station.FirstUploadIOA, 3, []byte("x")), asdu.CauseNotAuthorized)
+	if data, err := c.Interrogate(ctx, l.ca, asdu.QOIStation); err != nil || len(data) == 0 {
+		t.Errorf("Interrogate after the refusals: %d ASDUs, %v", len(data), err)
+	}
+	ses := l.st.Server.Sessions()
+	if len(ses) != 1 {
+		t.Fatalf("%d sessions", len(ses))
+	}
+	if n := ses[0].Security().Statistics()[sec.StatOperationAuthorizationFailures]; n != 2 {
+		t.Errorf("operation authorization failures %d, want 2", n)
+	}
+}
+
+// Under the A-Profile the station keeps an association per controlling
+// station: a client redundancy group shares one over its connections and
+// takes it along on a switchover, while another controlling station at the
+// same time has an association of its own and takes nothing over.
+func TestSecurityStations(t *testing.T) {
+	fx := station.Baseline(t)
+	srv, cli, controlling := secureOptions(t, fx.Station.CommonAddr, sec.HMACSHA256.Code)
+	l := &link{st: station.Start(t, fx, srv...), fx: fx, ca: fx.Station.CommonAddr, opts: cli, secure: controlling}
+	ctx := context.Background()
+
+	g, err := client.NewGroup([]string{l.st.Loopback(), l.st.Loopback()}, append(cli, controlling(t),
+		client.WithRequestTimeout(5*time.Second))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = g.Close() }()
+	if err := g.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	other := l.dial(t)
+
+	interrogate := func(what string) {
+		t.Helper()
+		for name, r := range map[string]interface {
+			Interrogate(context.Context, asdu.CommonAddr, asdu.QOI) ([]*asdu.ASDU, error)
+		}{"group": g, "other station": other} {
+			if data, err := r.Interrogate(ctx, l.ca, asdu.QOIStation); err != nil ||
+				!station.SameObserved(station.Observe(t, data), l.fx.Expected(false)) {
+				t.Errorf("%s: %s: Interrogate: %v", what, name, err)
+			}
+		}
+	}
+	// associations returns the distinct associations of the started sessions.
+	associations := func() map[*sec.Endpoint]int {
+		m := map[*sec.Endpoint]int{}
+		for _, s := range l.st.Server.Sessions() {
+			if ep := s.Security(); ep != nil && ep.Status().Up {
+				m[ep]++
+			}
+		}
+		return m
+	}
+
+	interrogate("first path")
+	if n := len(associations()); n != 2 {
+		t.Errorf("first path: %d associations carried, want 2", n)
+	}
+	if err := g.Switchover(ctx); err != nil {
+		t.Fatalf("Switchover: %v", err)
+	}
+	interrogate("after the switchover")
+	testutil.Eventually(t, "both stations carried by one session each", func() bool {
+		m := associations()
+		return len(m) == 2 && m[l.st.Server.Sessions()[0].Security()] == 1
+	})
+	for _, s := range l.st.Server.Sessions() {
+		if st := s.Security().Status(); st.AIM != 7 && st.AIM != 8 {
+			t.Errorf("session %d bound to the association of AIM %d", s.ID(), st.AIM)
+		}
+	}
+}
+
+// The station refuses a controlling station its factory has no association
+// for, or gets an endpoint of the wrong role for: what that station sends
+// is discarded, and the others are served.
+func TestSecurityRefusedStation(t *testing.T) {
+	fx := station.Baseline(t)
+	srv, cli, controlling := secureOptions(t, fx.Station.CommonAddr, sec.HMACSHA256.Code,
+		func(aim uint16, c *sec.Config) error {
+			switch aim {
+			case 8:
+				c.Role = sec.Controlling
+			case 9:
+				return errors.New("unknown controlling station")
+			}
+			return nil
+		})
+	l := &link{st: station.Start(t, fx, srv...), fx: fx, ca: fx.Station.CommonAddr, opts: cli, secure: controlling}
+	ctx := context.Background()
+	served := l.dial(t) // AIM 7
+	for _, aim := range []uint16{8, 9} {
+		dctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		c, err := client.Dial(dctx, l.st.Loopback(), append(cli, controlling(t))...)
+		cancel()
+		if err == nil {
+			_ = c.Close()
+			t.Errorf("AIM %d: associated", aim)
+		}
+	}
+	if data, err := served.Interrogate(ctx, l.ca, asdu.QOIStation); err != nil || len(data) == 0 {
+		t.Errorf("AIM 7: Interrogate: %d ASDUs, %v", len(data), err)
+	}
 }

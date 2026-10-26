@@ -9,6 +9,7 @@ is the authoritative text for each symbol; this document is the map.
 - [Package `client`](#package-client)
 - [Package `server`](#package-server)
 - [Package `asdu`](#package-asdu)
+- [Package `sec`](#package-sec)
 - [Package `apci`](#package-apci)
 - [Concurrency](#concurrency)
 
@@ -149,6 +150,7 @@ func (c *Client) Addr() string
 | `WithSwitchHandler(func(*Client))` | none | `Group` only: the active connection changed |
 | `WithRequestTimeout(time.Duration)` | 10s | Bound for request methods when the context has no deadline, and for every attempt with `WithRetry`; ≤ 0 disables |
 | `WithTLS(*tls.Config)` | none | TLS on top of the dialled connection |
+| `WithSecurity(*sec.Endpoint)` | none | IEC 62351-5 application-layer security; the endpoint must have role `sec.Controlling`. `Connect` returns once the secure session is established; share one endpoint among the clients of a `Group`, which serve one controlled station |
 | `WithDialer(Dialer)` | `net.Dialer` | Custom transport |
 | `WithLogger(iec104.Logger)` | silent | Logging |
 | `WithMetrics(iec104.Metrics)` | none | Metrics callbacks |
@@ -345,6 +347,7 @@ var ErrServerClosed error
 | `WithAccept(func(net.Addr) bool)` | all | Filter connections before any exchange |
 | `WithStateHandler(func(*Session, iec104.State, error))` | none | Session accepted / started / stopped / ended |
 | `WithTLS(*tls.Config)` | none | TLS in `ListenAndServe` |
+| `WithSecurity(func(group string, aim uint16) (*sec.Endpoint, error))` | none | IEC 62351-5 application-layer security: one endpoint, role `sec.Controlled`, per controlling station (AIM) and redundancy group, made when that station is first heard; an error refuses the AIM. A connection is bound by its first security message. Unprotected ASDUs are discarded; requests the endpoint's `Roles` do not permit are refused with `asdu.CauseNotAuthorized` before the handler |
 | `WithLogger(iec104.Logger)` | silent | Logging |
 | `WithMetrics(iec104.Metrics)` | none | Metrics callbacks |
 
@@ -475,6 +478,7 @@ func (s *Session) ID() uint64
 func (s *Session) RemoteAddr() net.Addr
 func (s *Session) LocalAddr() net.Addr
 func (s *Session) Conn() net.Conn           // e.g. to read the TLS peer certificate
+func (s *Session) Security() *sec.Endpoint  // the controlling station's association; nil without WithSecurity or before its first security message
 func (s *Session) Context() context.Context // cancelled when the session ends
 func (s *Session) Started() bool
 func (s *Session) Err() error
@@ -557,9 +561,10 @@ func (t TypeID) HasTimeTag() bool
 func (t TypeID) InControlDirection() bool
 func (t TypeID) IsProcessCommand() bool
 func (t TypeID) IsFileTransfer() bool
+func (t TypeID) IsSecurity() bool      // S_AQ_NA_1 … S_KP_NA_1, S_SD_NA_1 (IEC TS 60870-5-7)
 func (t TypeID) IsPrivate() bool
 
-type Cause uint8       // CausePeriodic … CauseUnknownIOA
+type Cause uint8       // CausePeriodic … CauseUnknownIOA; 14..17 of IEC TS 60870-5-7
 func (c Cause) String() string
 func (c Cause) IsUnknown() bool        // 44..47
 
@@ -681,6 +686,170 @@ Time tag rules:
 - A zero `Time` under a CP56Time2a type is sent flagged invalid; a received
   time that is not a real date decodes to the zero time flagged invalid.
 
+## Package `sec`
+
+`import "github.com/otfabric/go-iec104/sec"`
+
+The A-Profile of IEC 62351-5:2023 as IEC TS 60870-5-7:2025 applies it to
+IEC 60870-5-104 and -101. Applications make an `Endpoint` and hand it to
+`client.WithSecurity` or `server.WithSecurity`; the codec is exported for
+tools and tests. See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
+
+### Endpoint
+
+```go
+type Config struct {
+	Role                 Role          // Controlling (client) or Controlled (server)
+	AssociationID        uint16        // our half: the AIM of a controlling station, the AIS of a controlled one
+	Identity             *Identity     // certificate and private key; nil: a kept association only
+	Trust                Trust         // which remote stations may associate
+	IgnoreValidity       bool          // accept certificates outside their validity period
+	MAC                  uint8         // MAL a controlling station selects; default HMACSHA256.Code
+	DataProtection       uint8         // DPA a controlling station selects: a MAC code or AES256GCM; default MAC
+	AcceptMAC            []uint8       // what a controlled station accepts; empty: everything implemented
+	AcceptDataProtection []uint8
+	Settings             Settings      // timers and key limits
+	Store                KeyStore      // nil: a MemoryStore
+	Params               asdu.Params   // zero: asdu.IEC104
+	CommonAddr           asdu.CommonAddr // DUI of the key management messages
+	Originator           uint8
+	Roles                []AccessRole  // controlled: roles of the controlling station; nil: no access control
+	OnEvent              func(Event)   // security events; must not block
+	Rand                 io.Reader     // nil: crypto/rand
+}
+
+type Settings struct {
+	ReplyTimeout     time.Duration // controlling: wait per answer, default 2s
+	MaxReplyTimeouts int           // controlling: attempts before a procedure fails, default 3
+	RequestTimeout   time.Duration // controlled: wait for the next request, default 6s
+	KeyLifetime      time.Duration // default 15 min controlling, 30 min controlled
+	KeyUses          uint32        // default 1000 controlling, 2000 controlled
+}
+
+func New(cfg Config) (*Endpoint, error)            // loads cfg.Store
+
+func (e *Endpoint) Role() Role
+func (e *Endpoint) Status() Status                 // state, algorithms, remote certificate, last error; no keys
+func (e *Endpoint) Ready() bool                    // application data can be protected now
+func (e *Endpoint) Err() error                     // why the last procedure failed
+func (e *Endpoint) Statistics() Statistics         // the counters of IEC 62351-5
+func (e *Endpoint) Changed() <-chan struct{}       // closed at the next change worth waiting for
+func (e *Endpoint) Reassociate() error             // controlling: Station Association at the next Tick
+func (e *Endpoint) Renew() error                   // controlling: Session Key Change at the next Tick
+func (e *Endpoint) Permits(t asdu.TypeID) bool     // the roles allow a request of type t
+func (e *Endpoint) Refused(t asdu.TypeID)          // count a refusal
+
+// Driving it, for callers other than client and server. Each returns the
+// ASDUs to send, in order, on the connection that carries the association.
+func (e *Endpoint) Up(now time.Time) [][]byte
+func (e *Endpoint) Down()
+func (e *Endpoint) Attach(owner any, now time.Time) [][]byte // Up for one connection of a group
+func (e *Endpoint) Detach(owner any)
+func (e *Endpoint) Owns(owner any) bool
+func (e *Endpoint) Receive(now time.Time, raw []byte) (data []byte, out [][]byte, err error)
+func (e *Endpoint) Protect(now time.Time, data []byte) ([][]byte, error) // ErrNotReady: wait for Changed
+func (e *Endpoint) Deadline() time.Time            // when to call Tick; zero: no timer
+func (e *Endpoint) Tick(now time.Time) [][]byte
+```
+
+### Identities, trust and keys
+
+```go
+type Identity struct {
+	Certificate *x509.Certificate
+	Key         crypto.PrivateKey // *ecdsa.PrivateKey (P-256) or *ecdh.PrivateKey (X25519)
+}
+func LoadIdentity(certFile, keyFile string) (*Identity, error) // PEM; PKCS #8, or SEC 1 for P-256
+func ParseIdentity(certPEM, keyPEM []byte) (*Identity, error)
+func NewIdentity(o IdentityOptions) (*Identity, error)         // for provisioning and tests
+func (id *Identity) PEM() (certPEM, keyPEM []byte, err error)
+func (id *Identity) Pin() Trust                                // accept exactly this self-signed identity
+func ParseCertificates(data []byte) ([]*x509.Certificate, error)
+func Fingerprint(c *x509.Certificate) [32]byte                 // SHA-256 of the DER
+
+type IdentityOptions struct {
+	Curve               Curve     // P256 (default) or X25519 (needs an Issuer)
+	Subject             pkix.Name
+	NotBefore, NotAfter time.Time // default now-1min .. +1 year
+	Issuer              *Identity // a P-256 Central Authority; nil: self-signed
+	CA                  bool
+}
+
+type Trust struct {
+	Fingerprints [][32]byte          // self-signed certificates
+	PublicKeys   [][]byte            // self-signed certificates' public keys
+	Authorities  []*x509.Certificate // Central Authorities
+	Subjects     [][]byte            // with Authorities: only these subjects (DER)
+}
+
+type KeyStore interface {
+	Load() (s State, ok bool, err error)
+	Save(State) error
+}
+type MemoryStore struct{ /* zero value ready */ }
+type FileStore struct{ Path string } // JSON, mode 0600, written through a rename
+type State struct{ /* association IDs, algorithms, update keys, remote certificate, last session keys */ }
+```
+
+### Algorithms, roles, statistics
+
+```go
+var HMACSHA256, HMACSHA256Serial MACAlgorithm          // MAL 4 (16 octets), 3 (8 octets)
+var HMACSHA3_256, HMACSHA3_256Serial MACAlgorithm      // MAL 8, 7; Go 1.24 and later
+const AES256GCM uint8 = 11                             // DPA
+const KeyWrapAES256 uint8 = 2                          // KWA
+func MACByCode(code uint8) (MACAlgorithm, bool)
+func DataProtectionByCode(code uint8) (DataProtection, bool)
+type Curve uint8                                       // P256, X25519
+func ParseCurve(s string) (Curve, error)
+
+type AccessRole struct{ ID int; Name string; Perms Permission }
+var RoleViewer, RoleOperator, RoleEngineer, RoleInstaller, RoleSecAdmin, RoleSecAudit, RoleRBACMaint AccessRole
+var Roles []AccessRole
+func RequiredPermission(t asdu.TypeID) Permission
+func Authorized(roles []AccessRole, t asdu.TypeID) bool
+
+type Stat uint8                    // StatSuccessfulAssociations … StatDiscardedMessages, NumStats
+func (s Stat) Event() (mnemonic string, sev Severity, ok bool)
+type Statistics [NumStats]uint32
+type Event struct {
+	Stat     Stat      // NumStats for a failure to save the association ("KEY_STORE_ERR")
+	Mnemonic string    // e.g. "KEY_AUTN_ERR"
+	Severity Severity  // Notice, Warning, Alarm
+	Count    uint32
+	Err      error
+}
+```
+
+### Codec
+
+```go
+type Direction uint8 // Control, Monitor
+type Header struct {
+	Type               asdu.TypeID
+	Cause              asdu.Cause
+	Negative, Test     bool
+	Originator         uint8
+	CommonAddr         asdu.CommonAddr
+}
+type Message interface{ Type() asdu.TypeID }
+// AssociationRequest, AssociationResponse, UpdateKeyChangeRequest,
+// UpdateKeyChangeResponse, SessionInitiationRequest, SessionRequest,
+// SessionResponse, SessionKeyChangeRequest, SessionKeyChangeResponse,
+// SecureData
+func Encode(h Header, p asdu.Params, m Message) ([]byte, error)
+func Decode(b []byte, p asdu.Params, d Direction) (Header, Message, error) // whole messages, without ASC
+func PermittedCause(t asdu.TypeID, d Direction) (asdu.Cause, bool)
+func Segment(msg []byte, p asdu.Params, max int, seq uint8) (segs [][]byte, next uint8, err error)
+type ASC struct{ FIN, FIR bool; Seq uint8 }
+func ParseASC(b byte) ASC
+func AssociationOf(raw []byte, p asdu.Params) (aim uint16, ok bool) // the AIM of a first segment
+```
+
+Errors, all wrapped with detail: `ErrMessage`, `ErrNotReady`,
+`ErrUnsecured`, `ErrAuthentication`, `ErrReplay`, `ErrUnexpected`,
+`ErrCertificate`, `ErrAlgorithm`, `ErrProcedure`, `ErrConfig`.
+
 ## Package `apci`
 
 `import "github.com/otfabric/go-iec104/apci"`
@@ -735,8 +904,10 @@ Errors: `ErrInvalidStart`, `ErrInvalidLength`, `ErrInvalidControl`,
 
 ## Concurrency
 
-- Every method of `Client`, `Server`, `Session` and `Mux` is safe for
-  concurrent use.
+- Every method of `Client`, `Server`, `Session`, `Mux` and `sec.Endpoint`
+  is safe for concurrent use. `sec.Config.OnEvent` runs on the goroutine
+  that drove the endpoint (a connection's protocol loop), without locks
+  held, and must not block.
 - A client `Handler` runs on one goroutine per connection; a server
   `Handler` on one goroutine per session. ASDUs arrive in wire order.
 - A server handler may call any method of the library, `Session.Close` and

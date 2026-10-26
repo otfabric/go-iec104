@@ -68,48 +68,40 @@ const (
 	M_EI_NA_1 TypeID = 70 // End of initialization
 )
 
-// The type identifications IEC TS 60870-5-7 assigns to the secure
-// authentication of IEC 62351-5. This package names them and nothing more:
-// they are not [TypeID.Supported], travel as [ASDU.Raw], and the module does
-// not implement the authentication procedures.
+// The type identifications IEC TS 60870-5-7:2025 assigns to the security
+// extension of IEC 62351-5:2023 (the A-Profile). They are not
+// [TypeID.Supported] by this package and travel as [ASDU.Raw]; package sec
+// encodes, decodes and processes them.
 const (
-	S_IT_TC_1 TypeID = 41 // Integrated totals containing time-tagged security statistics
-	S_CH_NA_1 TypeID = 81 // Authentication challenge
-	S_RP_NA_1 TypeID = 82 // Authentication reply
-	S_AR_NA_1 TypeID = 83 // Aggressive mode authentication request
-	S_KR_NA_1 TypeID = 84 // Session key status request
-	S_KS_NA_1 TypeID = 85 // Session key status
-	S_KC_NA_1 TypeID = 86 // Session key change
-	S_ER_NA_1 TypeID = 87 // Authentication error
-	S_US_NA_1 TypeID = 90 // User status change
-	S_UQ_NA_1 TypeID = 91 // Update key change request
-	S_UR_NA_1 TypeID = 92 // Update key change reply
-	S_UK_NA_1 TypeID = 93 // Update key change, symmetric
-	S_UA_NA_1 TypeID = 94 // Update key change, asymmetric
-	S_UC_NA_1 TypeID = 95 // Update key change confirmation
+	S_AQ_NA_1 TypeID = 81 // Association request
+	S_AP_NA_1 TypeID = 82 // Association response
+	S_UH_NA_1 TypeID = 83 // Update key change request
+	S_UP_NA_1 TypeID = 84 // Update key change response
+	S_SI_NA_1 TypeID = 85 // Session initiation request
+	S_SQ_NA_1 TypeID = 86 // Session request
+	S_SP_NA_1 TypeID = 87 // Session response
+	S_KH_NA_1 TypeID = 88 // Session key change request
+	S_KP_NA_1 TypeID = 89 // Session key change response
+	S_SD_NA_1 TypeID = 91 // Secure data
 )
 
-// securityTypes are the types above: named, not modelled.
+// securityTypes are the types above: named here, modelled in package sec.
 var securityTypes = map[TypeID][2]string{
-	S_IT_TC_1: {"S_IT_TC_1", "Integrated totals containing time-tagged security statistics"},
-	S_CH_NA_1: {"S_CH_NA_1", "Authentication challenge"},
-	S_RP_NA_1: {"S_RP_NA_1", "Authentication reply"},
-	S_AR_NA_1: {"S_AR_NA_1", "Aggressive mode authentication request"},
-	S_KR_NA_1: {"S_KR_NA_1", "Session key status request"},
-	S_KS_NA_1: {"S_KS_NA_1", "Session key status"},
-	S_KC_NA_1: {"S_KC_NA_1", "Session key change"},
-	S_ER_NA_1: {"S_ER_NA_1", "Authentication error"},
-	S_US_NA_1: {"S_US_NA_1", "User status change"},
-	S_UQ_NA_1: {"S_UQ_NA_1", "Update key change request"},
-	S_UR_NA_1: {"S_UR_NA_1", "Update key change reply"},
-	S_UK_NA_1: {"S_UK_NA_1", "Update key change, symmetric"},
-	S_UA_NA_1: {"S_UA_NA_1", "Update key change, asymmetric"},
-	S_UC_NA_1: {"S_UC_NA_1", "Update key change confirmation"},
+	S_AQ_NA_1: {"S_AQ_NA_1", "Association request"},
+	S_AP_NA_1: {"S_AP_NA_1", "Association response"},
+	S_UH_NA_1: {"S_UH_NA_1", "Update key change request"},
+	S_UP_NA_1: {"S_UP_NA_1", "Update key change response"},
+	S_SI_NA_1: {"S_SI_NA_1", "Session initiation request"},
+	S_SQ_NA_1: {"S_SQ_NA_1", "Session request"},
+	S_SP_NA_1: {"S_SP_NA_1", "Session response"},
+	S_KH_NA_1: {"S_KH_NA_1", "Session key change request"},
+	S_KP_NA_1: {"S_KP_NA_1", "Session key change response"},
+	S_SD_NA_1: {"S_SD_NA_1", "Secure data"},
 }
 
-// IsSecurity reports whether the type belongs to the secure authentication
-// of IEC 62351-5 as IEC TS 60870-5-7 numbers it (41, 81..87, 90..95). Such
-// types are carried as raw payload.
+// IsSecurity reports whether the type belongs to the security extension of
+// IEC TS 60870-5-7:2025 (81..89 and 91). Such types are carried as raw
+// payload.
 func (t TypeID) IsSecurity() bool {
 	_, ok := securityTypes[t]
 	return ok
@@ -224,9 +216,10 @@ const (
 	CauseReturnRemote        Cause = 11 // Return information caused by a remote command
 	CauseReturnLocal         Cause = 12 // Return information caused by a local command
 	CauseFileTransfer        Cause = 13 // File transfer
-	CauseAuthentication      Cause = 14 // Authentication (IEC TS 60870-5-7)
-	CauseSessionKey          Cause = 15 // Maintenance of authentication session key
-	CauseUserRoleUpdateKey   Cause = 16 // Maintenance of user role and update key
+	CauseDataProtection      Cause = 14 // Application data protection (IEC TS 60870-5-7)
+	CauseSessionKey          Cause = 15 // Maintenance of session key (IEC TS 60870-5-7)
+	CauseAssociation         Cause = 16 // Maintenance of association and update key (IEC TS 60870-5-7)
+	CauseNotAuthorized       Cause = 17 // Operation not authorized (IEC TS 60870-5-7, controlled station only)
 	CauseInterrogatedStation Cause = 20 // Interrogated by station interrogation
 	CauseInterrogatedGroup1  Cause = 21 // Interrogated by group 1 interrogation; groups 2..16 follow
 	CauseInterrogatedGroup16 Cause = 36 // Interrogated by group 16 interrogation
@@ -253,9 +246,10 @@ var causeNames = map[Cause]string{
 	CauseReturnRemote:        "return-remote",
 	CauseReturnLocal:         "return-local",
 	CauseFileTransfer:        "file-transfer",
-	CauseAuthentication:      "authentication",
+	CauseDataProtection:      "data-protection",
 	CauseSessionKey:          "session-key",
-	CauseUserRoleUpdateKey:   "user-role-update-key",
+	CauseAssociation:         "association",
+	CauseNotAuthorized:       "not-authorized",
 	CauseInterrogatedStation: "interrogated-station",
 	CauseCounterGeneral:      "counter-general",
 	CauseUnknownType:         "unknown-type",

@@ -91,6 +91,30 @@ type Config struct {
 	// OnClose is called exactly once, after every other callback returned.
 	// err is iec104.ErrClosed when the local application closed the link.
 	OnClose func(err error)
+
+	// Security, when set, applies application-layer security (IEC 62351-5)
+	// to every ASDU: what is sent is protected first, what is received is
+	// verified and only the application data it carries is delivered.
+	// NotReady is the error with which Security.Protect says that it cannot
+	// protect yet (sec.ErrNotReady); the link then holds the request until
+	// the security changes.
+	Security Security
+	NotReady error
+}
+
+// Security is the application-layer security of a link, which
+// *sec.Endpoint implements. Several links (a redundancy group) may share
+// one; the link with data transfer started carries it. The link calls it
+// from its protocol goroutine and sends what it returns, in order.
+type Security interface {
+	Attach(owner any, now time.Time) [][]byte
+	Detach(owner any)
+	Owns(owner any) bool
+	Receive(now time.Time, raw []byte) (data []byte, out [][]byte, err error)
+	Protect(now time.Time, data []byte) ([][]byte, error)
+	Tick(now time.Time) [][]byte
+	Deadline() time.Time
+	Changed() <-chan struct{}
 }
 
 type dtState uint8
@@ -109,6 +133,25 @@ type sendReq struct {
 	// in, on the protocol goroutine and before the frame is written.
 	epoch *atomic.Uint64
 	done  chan error
+	// claim is reqPending until the loop takes the request (reqTaken) or
+	// the sender gives up on it (reqCancelled), whichever comes first.
+	claim atomic.Int32
+}
+
+const (
+	reqPending int32 = iota
+	reqTaken
+	reqCancelled
+)
+
+func (r *sendReq) take() bool { return r.claim.CompareAndSwap(reqPending, reqTaken) }
+
+// txFrame is an I frame waiting in the transmit queue of a link with
+// security: a frame of a security message, or the last segment of protected
+// application data, which carries the request.
+type txFrame struct {
+	asdu []byte
+	req  *sendReq
 }
 
 // outstanding is an I frame that was sent and not yet acknowledged.
@@ -153,7 +196,7 @@ type Link struct {
 	conn net.Conn
 	cfg  Config
 
-	sendCh  chan sendReq
+	sendCh  chan *sendReq
 	ctlCh   chan ctlReq
 	frameCh chan readResult
 	closeCh chan struct{}
@@ -193,6 +236,10 @@ type Link struct {
 	idleAt      time.Time
 	pending     map[apci.UFunction]*pendingU
 	wbuf        []byte
+	// With Security: I frames to send, in order, and the request held
+	// while the security cannot protect it yet.
+	txq  []txFrame
+	held *sendReq
 }
 
 // New starts the protocol machine on an established connection. The Link
@@ -201,7 +248,7 @@ func New(conn net.Conn, cfg Config) *Link {
 	l := &Link{
 		conn:       conn,
 		cfg:        cfg,
-		sendCh:     make(chan sendReq),
+		sendCh:     make(chan *sendReq),
 		ctlCh:      make(chan ctlReq),
 		frameCh:    make(chan readResult, 64),
 		closeCh:    make(chan struct{}),
@@ -336,7 +383,7 @@ func (l *Link) send(ctx context.Context, asdu []byte, acked func(), epoch *atomi
 		}
 		return iec104.ErrNotStarted
 	}
-	r := sendReq{asdu: asdu, acked: acked, epoch: epoch, done: make(chan error, 1)}
+	r := &sendReq{asdu: asdu, acked: acked, epoch: epoch, done: make(chan error, 1)}
 	select {
 	case l.sendCh <- r:
 	case <-ctx.Done():
@@ -344,7 +391,17 @@ func (l *Link) send(ctx context.Context, asdu []byte, acked func(), epoch *atomi
 	case <-l.done:
 		return l.Err()
 	}
-	return <-r.done
+	// The loop answers a request it has taken, at once or, with security,
+	// once it is written. One it holds may be given up.
+	select {
+	case err := <-r.done:
+		return err
+	case <-ctx.Done():
+		if r.claim.CompareAndSwap(reqPending, reqCancelled) {
+			return ctx.Err()
+		}
+		return <-r.done
+	}
 }
 
 // StartDT sends STARTDT act and waits for its confirmation.
@@ -412,6 +469,21 @@ func (l *Link) run() {
 
 	var err error
 	for err == nil {
+		var secCh <-chan struct{}
+		if l.cfg.Security != nil {
+			// Taken before anything is looked at: a change after this point
+			// closes this channel and is not missed.
+			secCh = l.cfg.Security.Changed()
+			// A change while the last event was handled closed the
+			// previous channel, which nobody waits on any more.
+			if r := l.held; r != nil && l.cfg.Security.Owns(l) {
+				l.held = nil
+				l.protect(r)
+			}
+			if err = l.flush(); err != nil {
+				break
+			}
+		}
 		frameCh := l.frameCh
 		queued := l.queueLen()
 		if queued >= hardQueue {
@@ -424,7 +496,7 @@ func (l *Link) run() {
 			}
 		}
 		sendCh := l.sendCh
-		if len(l.unacked) >= l.cfg.Params.K {
+		if len(l.unacked) >= l.cfg.Params.K || l.held != nil || len(l.txq) > 0 {
 			sendCh = nil
 		}
 		timer.Reset(l.untilDeadline())
@@ -443,6 +515,8 @@ func (l *Link) run() {
 		case r := <-l.ctlCh:
 			err = l.onControl(r)
 		case <-l.wake:
+		case <-secCh:
+			err = l.onSecurity(time.Now())
 		case <-timer.C:
 			err = l.onTimer(time.Now())
 		}
@@ -462,6 +536,10 @@ func (l *Link) shutdown(err error) {
 	l.err = err
 	l.errMu.Unlock()
 	l.isStarted.Store(false)
+	if s := l.cfg.Security; s != nil {
+		s.Detach(l)
+		l.dropTx(err)
+	}
 	if l.reported && l.cfg.OnTransfer != nil {
 		// The period ends with the link; no "stopped" is queued for the
 		// dispatcher, which reports the end of the link instead.
@@ -505,6 +583,11 @@ func (l *Link) untilDeadline() time.Duration {
 	if p.T3 > 0 {
 		consider(l.idleAt)
 	}
+	if s := l.cfg.Security; s != nil && s.Owns(l) {
+		if d := s.Deadline(); !d.IsZero() {
+			consider(d)
+		}
+	}
 	if next.IsZero() {
 		return time.Hour
 	}
@@ -532,10 +615,110 @@ func (l *Link) onTimer(now time.Time) error {
 	if p.T3 > 0 && !now.Before(l.idleAt) {
 		l.idleAt = now.Add(p.T3)
 		if _, busy := l.pending[apci.TestFRAct]; !busy {
-			return l.sendAct(apci.TestFRAct, nil)
+			if err := l.sendAct(apci.TestFRAct, nil); err != nil {
+				return err
+			}
 		}
 	}
+	return l.onSecurity(now)
+}
+
+// onSecurity runs the timers of the security when they are due and gives a
+// held request another try.
+func (l *Link) onSecurity(now time.Time) error {
+	s := l.cfg.Security
+	if s == nil || !s.Owns(l) {
+		return nil
+	}
+	if d := s.Deadline(); !d.IsZero() && !now.Before(d) {
+		l.enqueue(s.Tick(now))
+	}
+	if r := l.held; r != nil {
+		l.held = nil
+		l.protect(r)
+	}
 	return nil
+}
+
+// enqueue appends frames of the security to the transmit queue.
+func (l *Link) enqueue(frames [][]byte) {
+	for _, f := range frames {
+		l.txq = append(l.txq, txFrame{asdu: f})
+	}
+}
+
+// protect hands an application ASDU to the security and queues what it
+// returns, or holds the request while the security is not ready.
+func (l *Link) protect(r *sendReq) {
+	if r.claim.Load() == reqCancelled {
+		return
+	}
+	s := l.cfg.Security
+	frames, err := s.Protect(time.Now(), r.asdu)
+	if l.cfg.NotReady != nil && errors.Is(err, l.cfg.NotReady) {
+		l.held = r
+		return
+	}
+	if !r.take() {
+		return
+	}
+	if err != nil {
+		r.done <- err
+		return
+	}
+	for i, f := range frames {
+		tf := txFrame{asdu: f}
+		if i == len(frames)-1 {
+			tf.req = r
+		}
+		l.txq = append(l.txq, tf)
+	}
+}
+
+// flush writes queued I frames while the send window allows.
+func (l *Link) flush() error {
+	for len(l.txq) > 0 {
+		if l.state != started {
+			l.dropTx(iec104.ErrNotStarted)
+			return nil
+		}
+		if len(l.unacked) >= l.cfg.Params.K {
+			return nil
+		}
+		f := l.txq[0]
+		l.txq[0] = txFrame{}
+		l.txq = l.txq[1:]
+		var acked func()
+		var epoch *atomic.Uint64
+		if f.req != nil {
+			acked, epoch = f.req.acked, f.req.epoch
+		}
+		err := l.writeI(f.asdu, acked, epoch)
+		if f.req != nil {
+			f.req.done <- err
+		}
+		if err != nil {
+			return err
+		}
+	}
+	l.txq = nil
+	return nil
+}
+
+// dropTx ends what waits in the transmit queue and the held request.
+func (l *Link) dropTx(err error) {
+	for _, f := range l.txq {
+		if f.req != nil {
+			f.req.done <- err
+		}
+	}
+	l.txq = nil
+	if r := l.held; r != nil {
+		l.held = nil
+		if r.take() {
+			r.done <- err
+		}
+	}
 }
 
 func (l *Link) setState(s dtState) {
@@ -549,6 +732,14 @@ func (l *Link) setState(s dtState) {
 	if (s == started || s == stopped) && l.reported != is {
 		l.reported = is
 		l.settled.Store(is)
+		if sec := l.cfg.Security; sec != nil {
+			if is {
+				l.enqueue(sec.Attach(l, time.Now()))
+			} else {
+				sec.Detach(l)
+				l.dropTx(iec104.ErrNotStarted)
+			}
+		}
 		if l.cfg.OnTransfer != nil {
 			l.cfg.OnTransfer(l, is, l.epoch.Load())
 		}
@@ -566,26 +757,40 @@ func (l *Link) Settled() bool { return l.settled.Load() }
 // and so on. An I frame belongs to the period it was sent in.
 func (l *Link) Epoch() uint64 { return l.epoch.Load() }
 
-func (l *Link) onSend(r sendReq) error {
+func (l *Link) onSend(r *sendReq) error {
 	if l.state != started {
-		r.done <- iec104.ErrNotStarted
+		if r.take() {
+			r.done <- iec104.ErrNotStarted
+		}
 		return nil
 	}
+	if l.cfg.Security != nil {
+		l.protect(r)
+		return nil
+	}
+	if !r.take() {
+		return nil
+	}
+	err := l.writeI(r.asdu, r.acked, r.epoch)
+	r.done <- err
+	return err
+}
+
+// writeI writes one I frame.
+func (l *Link) writeI(asdu []byte, acked func(), epoch *atomic.Uint64) error {
 	if !l.throttled {
 		// The I frame carries N(R) and so acknowledges what was received.
 		l.sentNR = l.vr
 		l.recvUnacked = 0
 	}
-	if r.epoch != nil {
-		r.epoch.Store(l.epoch.Load())
+	if epoch != nil {
+		epoch.Store(l.epoch.Load())
 	}
-	if err := l.write(apci.NewI(l.vs, l.sentNR, r.asdu)); err != nil {
-		r.done <- err
+	if err := l.write(apci.NewI(l.vs, l.sentNR, asdu)); err != nil {
 		return err
 	}
 	l.vs = apci.SeqNext(l.vs)
-	l.unacked = append(l.unacked, outstanding{sent: time.Now(), acked: r.acked})
-	r.done <- nil
+	l.unacked = append(l.unacked, outstanding{sent: time.Now(), acked: acked})
 	return nil
 }
 
@@ -709,13 +914,34 @@ func (l *Link) onFrame(f apci.Frame) error {
 	if l.recvUnacked == 1 {
 		l.t2At = now.Add(l.cfg.Params.T2)
 	}
-	l.push(event{kind: evASDU, data: f.ASDU})
+	if data := l.unprotect(now, f.ASDU); data != nil {
+		l.push(event{kind: evASDU, data: data})
+	}
 	// While a STOPDT is in progress the peer is waiting for this
 	// acknowledgement, so it is not delayed.
 	if (l.recvUnacked >= l.cfg.Params.W && !l.throttled) || l.state == stopping {
 		return l.sendS()
 	}
 	return nil
+}
+
+// unprotect passes a received ASDU through the security, if any, and
+// returns the application data to deliver.
+func (l *Link) unprotect(now time.Time, raw []byte) []byte {
+	s := l.cfg.Security
+	if s == nil {
+		return raw
+	}
+	if !s.Owns(l) {
+		l.cfg.Log.Debug("dropping ASDU: the association is carried by another connection")
+		return nil
+	}
+	data, out, err := s.Receive(now, raw)
+	l.enqueue(out)
+	if err != nil {
+		l.cfg.Log.Debug("security discarded an ASDU", "error", err)
+	}
+	return data
 }
 
 func (l *Link) acknowledge(nr uint16) error {

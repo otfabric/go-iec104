@@ -1097,7 +1097,8 @@ func TestConnectInTwoSteps(t *testing.T) {
 func TestEveryRequestAtOnce(t *testing.T) {
 	transports(t, func(t *testing.T, l *link) {
 		ctx := context.Background()
-		const clients, rounds = 4, 12
+		const rounds = 12
+		const clients = 4
 		points := len(l.fx.Expected(false))
 		counters := len(l.fx.Expected(true))
 		small, large := l.fx.Files[0], l.fx.Files[len(l.fx.Files)-1]

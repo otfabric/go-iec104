@@ -681,10 +681,10 @@ func TestSecurityTypes(t *testing.T) {
 			t.Errorf("%d: %s %q, supported %v", id, typ, typ.Description(), typ.Supported())
 		}
 	}
-	if n != 14 || S_CH_NA_1.String() != "S_CH_NA_1" || S_IT_TC_1 != 41 || S_UC_NA_1 != 95 {
+	if n != 10 || S_AQ_NA_1.String() != "S_AQ_NA_1" || S_AQ_NA_1 != 81 || S_SD_NA_1 != 91 || TypeID(90).IsSecurity() {
 		t.Errorf("%d security types", n)
 	}
-	a := &ASDU{Type: S_CH_NA_1, Cause: CauseAuthentication, CommonAddr: 1, Raw: []byte{1, 2, 3, 4}, RawCount: 1}
+	a := &ASDU{Type: S_SD_NA_1, Cause: CauseDataProtection, CommonAddr: 1, Raw: []byte{1, 2, 3, 4}, RawCount: 1}
 	wire, err := a.Encode(IEC104)
 	if err != nil {
 		t.Fatal(err)

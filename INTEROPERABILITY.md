@@ -18,7 +18,7 @@ behaviour is the application's.
 | Transport | TCP, IPv4 and IPv6 |
 | Port | 2404 by default, any |
 | TLS (IEC 62351-3) | yes, standard `crypto/tls`, default port 19998 |
-| IEC 62351-5 application-layer security (IEC TS 60870-5-7) | no: the types and causes are named and carried as raw payload; the procedures are not implemented. See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5) |
+| IEC 62351-5 application-layer security (IEC TS 60870-5-7) | yes, the A-Profile of the 2023 edition, package `sec`, both roles. See [Application-layer security](#application-layer-security) |
 | Redundant connections (redundancy groups) | yes, both roles. See [Redundancy](#redundancy) |
 
 ## Application layer framing
@@ -163,14 +163,33 @@ for download, upload and the directory (`Client.GetFile`, `PutFile`,
 and the query log are the application's. See
 [Basic application functions](#basic-application-functions).
 
+### Security (IEC TS 60870-5-7:2025)
+
+| Type | ID | Description | Support |
+|------|----|-------------|---------|
+| `S_AQ_NA_1` | 81 | Association request | yes, `sec` |
+| `S_AP_NA_1` | 82 | Association response | yes, `sec` |
+| `S_UH_NA_1` | 83 | Update key change request | yes, `sec` |
+| `S_UP_NA_1` | 84 | Update key change response | yes, `sec` |
+| `S_SI_NA_1` | 85 | Session initiation request | yes, `sec` |
+| `S_SQ_NA_1` | 86 | Session request | yes, `sec` |
+| `S_SP_NA_1` | 87 | Session response | yes, `sec` |
+| `S_KH_NA_1` | 88 | Session key change request | yes, `sec` |
+| `S_KP_NA_1` | 89 | Session key change response | yes, `sec` |
+| `S_SD_NA_1` | 91 | Secure data | yes, `sec` |
+
+With `WithSecurity` the library creates and checks them; without it they
+are **raw**, like any type `asdu` does not decode.
+
 ### Private range
 
 Types 128..255 are **raw** in both directions.
 
 ## Causes of transmission
 
-All causes 1..13, 20..41 and 44..47 are defined (`asdu.Cause…`) and carried
-unchanged. The originator address is supported (`client.WithOriginator`).
+All causes 1..17, 20..41 and 44..47 are defined (`asdu.Cause…`) and carried
+unchanged; 14..17 are those of IEC TS 60870-5-7 (data protection, session
+key, association, operation not authorized). The originator address is supported (`client.WithOriginator`).
 The test bit and the P/N bit are exposed as `ASDU.Test` and `ASDU.Negative`.
 
 ## Basic application functions
@@ -217,6 +236,60 @@ redundancy group, of which exactly one is started.
   automatic failover when the active one is lost and manual `Switchover`.
   A single `Client` with `WithAutoStart(false)` is the building block.
 
+## Application-layer security
+
+The A-Profile of IEC 62351-5:2023 as IEC TS 60870-5-7:2025 applies it to
+IEC 60870-5-104, in package `sec` (`client.WithSecurity`,
+`server.WithSecurity`). See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5)
+for what it protects and where it came from.
+
+| Item | Support |
+|------|---------|
+| Station Association, Session Key Change, Secure Data | yes, both roles |
+| Session Initiation Request (controlled station asks for keys) | yes |
+| Segmentation of security messages (ASC octet) | yes, both directions |
+| Protocol version | 1.0 |
+| Key agreement | ECDH on secp256r1 or Curve25519 |
+| Key derivation | HKDF with the hash of the MAC algorithm |
+| Key wrap (KWA) | 2, AES-256 key wrap (RFC 3394) |
+| MAC algorithms (MAL) | 3 HMAC-SHA-256/8, 4 HMAC-SHA-256/16 (default), 7 and 8 HMAC-SHA3-256/8 and /16 (built with Go 1.24 or later) |
+| Data protection (DPA) | the MAC algorithms above, 11 AES-256-GCM |
+| Certificates | X.509, self-signed and pinned, or issued by a trusted Central Authority, optionally restricted by subject |
+| Role-based access control | the seven roles of IEC TS 60870-5-7, configured per association; refusals with cause 17 |
+| Several controlling stations at one station | yes, one association per AIM, made on first contact or refused |
+| Security statistics and events | yes, all counters and mnemonics |
+| Broadcast session key (IEC 60870-5-101) | no |
+| secp256k1, X448, brainpool curves; BLAKE2s | no |
+| IEC 62351-8 access tokens, certificate revocation lists | no |
+
+Behaviour that goes beyond what cB-Sigma/iec60870 v0.3.0 does, and stays
+compatible with it:
+
+- The controlling station changes the session keys whenever a connection
+  starts, and holds its data until the change is complete. The controlled
+  station holds what it sends until new keys arrive, and accepts data under
+  the previous keys meanwhile, from a controlling station that kept them;
+  it asks with a Session Initiation Request after a third of
+  `Settings.RequestTimeout` if the controlling station has not started a
+  change by then.
+- A Session Initiation Request that crosses the controlling station's
+  Session Request is accepted, and the Session Response is verified in
+  both of the forms the crossing allows.
+- A Session Key Change that fails makes the next attempt a Station
+  Association; failed attempts are repeated with a backoff from
+  `Settings.ReplyTimeout` doubling to one minute.
+- A Central Authority certificate is checked by its signature on the
+  station certificate only, which accepts the authority certificates of
+  cB-Sigma that carry no basic constraints.
+
+Where the two differ in what a controlled station permits:
+
+- The acknowledgement of a download (F_AF_NA_1 from the controlling
+  station) needs the file read permission, so a VIEWER downloads a file to
+  its end. cB-Sigma asks for file write, and refuses a viewer's
+  acknowledgement with cause 17 after sending the whole file (seen in the
+  container suite); a go-iec104 client then reports the refusal.
+
 ## Known deviations
 
 - The client's activation confirmation wait does not extend to the
@@ -225,6 +298,28 @@ redundancy group, of which exactly one is started.
   answer.
 
 ## Verification status
+
+The application-layer security is checked against octet strings produced by
+the encoder of cB-Sigma/iec60870 v0.3.0 in the unit tests, and by
+differential tests that run complete associations between the two
+implementations in memory: both roles, every data protection algorithm,
+segmented messages, renewal, crossing requests and Curve25519 certificates
+issued by an authority.
+
+The container suite below runs it against cB-Sigma too, through the
+security flags of the iec104-interop container contract 1.2: go-iec104's
+client against the cB-Sigma station and the cB-Sigma client against a
+go-iec104 station, with certificates issued by an authority and pinned
+self-signed ones, secp256r1 and X25519, HMAC-SHA-256 and AES-256-GCM, other
+association identities, role-based access control (a viewer's command
+refused with cause 17, an operator's executed, a viewer's download from a
+go-iec104 station completed), a station that refuses an
+AIM, untrusted certificates on either side and a client without security.
+Where a reference station can do the same, the cB-Sigma client's complete
+result must not tell go-iec104 from it. The cB-Sigma image is not released
+yet: these tests run when `IEC104_INTEROP_CBSIGMA_IMAGE` names a build
+(`make image-cbsigma` in iec104-interop), and were run so for this
+version.
 
 Besides its own tests the library is run against three independent
 implementations, as client and as server, on every push. The reference

@@ -33,6 +33,11 @@ The library provides:
   reconnect, retries for the requests that are safe to repeat, redundancy
   groups with failover, structured logging, metrics hooks and TLS
   (IEC 62351-3)
+- **Application-layer security** (IEC 62351-5:2023 with
+  IEC TS 60870-5-7:2025): Station Association with X.509 certificates,
+  session keys, every ASDU authenticated (HMAC) or encrypted (AES-256-GCM),
+  role-based access control and the security statistics, with or without
+  TLS. Interoperable with cB-Sigma/iec60870
 - **Verified against third-party stacks**: every push runs the library, as
   client and as server, against MZ Automation lib60870-C, OpenMUC j60870 and
   wendy512/iec104
@@ -84,7 +89,7 @@ you can pick the right one for your project.
 | Private types (128..255) | raw payload | raw payload | custom decoder | — dropped |
 | Configurable `k`, `w`, `t0`..`t3` | ✅ | ✅ | ✅ | ✅ |
 | TLS (IEC 62351-3) | ✅ `crypto/tls` | ✅ mbedTLS | via socket factory | ✅ `crypto/tls` |
-| Application-layer security (IEC 62351-5) | — types carried, no procedure | — commercial add-on (2013 edition) | — | — |
+| Application-layer security (IEC 62351-5) | ✅ 2023 edition, package `sec` | — commercial add-on (2013 edition) | — | — |
 | Blocking request methods (interrogate and collect, command and confirm) | ✅ | — callbacks | — callbacks | — callbacks |
 | Server-side routing with standard refusals (unknown type, cause, address) | ✅ `Mux` | partly built in | unknown type only | partly, without the P/N bit |
 | Redundancy group, client side (failover, switchover) | ✅ `Group` | — | — | — |
@@ -148,12 +153,16 @@ go-iec104/
 ├── asdu/                           ASDU model and codec (IEC 101/104)
 ├── client/                         controlling station
 ├── server/                         controlled station, sessions, Mux
+├── sec/                            application-layer security, IEC 62351-5
+│                                   with IEC TS 60870-5-7 (A-Profile)
 ├── internal/link/                  the protocol machine client and server share
 ├── internal/station/               a fixture-driven station for the tests below
 ├── e2e/                            go-iec104 client against go-iec104 server
 ├── interop/                        tests against lib60870, OpenMUC j60870, wendy512
-│                                   (build tag "interop", needs Docker)
-└── examples/                       nine programs to start from
+│                                   (build tag "interop", needs Docker);
+│   └── cbsigma/                    IEC 62351-5 against cB-Sigma/iec60870,
+│                                   a module of its own
+└── examples/                       ten programs to start from
 ```
 
 APCI is specific to IEC 60870-5-104 and lives with it. The ASDU package has no
@@ -297,6 +306,8 @@ _ = srv.Enqueue(asdu.New(asdu.CauseSpontaneous, 1,
 | Redundancy | `client.NewGroup` | Several connections to one station, exactly one started, automatic failover and manual `Switchover` |
 | Structured logging | `iec104.NewSlogLogger`, or any `iec104.FieldLogger` | Constant messages with fields (`component`, `remote`, `state`, `type`, `error`, …); silent by default |
 | Metrics hooks | `iec104.Metrics`, `RequestMetrics`, `HandlerMetrics` | Connections, frames, request outcomes with duration and retries, handler duration |
+| TLS (IEC 62351-3) | `client.WithTLS`, `server.WithTLS` | A standard `*tls.Config`, not weakened or overridden |
+| Application-layer security (IEC 62351-5) | `client.WithSecurity`, `server.WithSecurity`, package `sec` | Certificates, session keys, Secure Data, roles, statistics; see below |
 
 ```go
 c, err := client.Dial(ctx, "10.0.0.5:2404",
@@ -325,6 +336,27 @@ defer g.Close()
 
 data, err := g.Interrogate(ctx, 1, asdu.QOIStation) // on the active connection
 ```
+
+**Application-layer security.** IEC 62351-5 authenticates every ASDU end
+to end, whatever carries it, and lets the station authorize each request by
+the role of the controlling station. One `sec.Endpoint` per association:
+
+```go
+ep, err := sec.New(sec.Config{
+	Role: sec.Controlling, AssociationID: 1,
+	Identity: id,                                         // sec.LoadIdentity("scada.pem", "scada.key")
+	Trust:    sec.Trust{Authorities: []*x509.Certificate{plantCA}},
+	DataProtection: sec.AES256GCM,                        // or HMAC only, the default
+	Store:    sec.FileStore{Path: "/var/lib/scada/station1.keys"},
+})
+c, err := client.Dial(ctx, "10.0.0.5:2404", client.WithSecurity(ep)) // returns with the session established
+```
+
+The station side gives `server.WithSecurity` a function that makes the
+endpoint of each controlling station, by its AIM, with the `Trust` that
+accepts only that station and its `Roles` for access control. See
+[examples/secure](examples/secure/main.go) and
+[SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
 
 **Why commands are not retried.** When the confirmation of a command is lost,
 the command may still have operated the process, and the protocol has no way
@@ -397,8 +429,8 @@ Full guide: **[ERRORS.md](ERRORS.md)**.
 
 ## Examples
 
-The [examples](examples/README.md) folder has nine programs to start from.
-Seven are self-contained (station and controlling station in one process,
+The [examples](examples/README.md) folder has ten programs to start from.
+Eight are self-contained (station and controlling station in one process,
 over TCP on loopback), so they run as they are:
 
 ```sh
@@ -408,6 +440,7 @@ go run ./examples/files           # download, upload and directory
 go run ./examples/events          # event queue, broadcast, end of initialization
 go run ./examples/redundancy      # redundancy group, switchover, failover
 go run ./examples/tls             # TLS with certificates on both sides
+go run ./examples/secure          # IEC 62351-5: association, Secure Data, roles
 go run ./examples/observability   # logs, states, metrics, retries, reconnect
 ```
 
@@ -428,6 +461,7 @@ Both take `-debug` to log every APDU.
 make check      # format, lint, vet, vulnerability scan, tests, coverage
 make test       # tests with the race detector
 make fuzz       # codec fuzz targets (FUZZTIME=30s each)
+make test-cbsigma  # IEC 62351-5 against cB-Sigma/iec60870 (Go 1.26)
 make bench      # codec benchmarks
 ```
 
@@ -437,7 +471,9 @@ against each other and against scripted peers over loopback TCP.
 The `e2e` package runs the library against itself, end to end, as part of
 `go test ./...`:
 
-- **Station scenarios** over TCP, TLS and with `k = w = 1`, against a station
+- **Station scenarios** over TCP, TLS, with `k = w = 1`, and with the
+  application-layer security of IEC 62351-5 (HMAC over TCP, AES-256-GCM
+  over TLS), against a station
   that serves the fixture of the interop suite (the one the reference
   clients are run against below): interrogation, counter interrogation and
   read value by value, every command type with and without time tag,
@@ -493,23 +529,45 @@ request. To test against another build, set `IEC104_INTEROP_LIB60870_IMAGE`,
 `IEC104_INTEROP_OPENMUC_IMAGE` or `IEC104_INTEROP_WENDY512_IMAGE`; to run
 one stack only, `IEC104_INTEROP_ADAPTERS=lib60870`.
 
+A fourth reference, cB-Sigma/iec60870, takes part when
+`IEC104_INTEROP_CBSIGMA_IMAGE` names its image, which iec104-interop has
+not released yet (`make image-cbsigma` there builds it). It is the only one
+with IEC 62351-5: the suite then runs the scenarios above against it, and
+the application-layer security in both directions (certificates from an
+authority and pinned, secp256r1 and X25519, HMAC and AES-256-GCM, role-based
+access control, refused and untrusted stations).
+
+The application-layer security of IEC 62351-5 is tested against
+[cB-Sigma/iec60870](https://github.com/cB-Sigma/iec60870), the open-source
+implementation its formats were derived from, in process rather than in a
+container: `interop/cbsigma` is a module of its own, so that go-iec104 keeps
+no dependencies, and runs in the Interop workflow with `make test-cbsigma`.
+It compares the encodings of every message and runs complete associations
+in both roles with every data protection algorithm, segmented data,
+renewals, restarts, reconnects, crossing requests and Curve25519
+certificates issued by an authority.
+
 The references do not all support the same. The suite asks each image what
 it declares (`print-capabilities`) and skips, rather than fails, what an
 image lacks:
 
-| | lib60870-C | j60870 | wendy512/iec104 |
-|---|:---:|:---:|:---:|
-| Everything in the table above except the rows below | ✅ | ✅ | ✅ |
-| Commands with time tag | ✅ | ✅ | — the stack drops them |
-| File download, reference as server (`GetFile`) | ✅ | — no file server | — |
-| File download, reference as client (`FileServer`) | ✅ | ✅ | — |
+| | lib60870-C | j60870 | wendy512/iec104 | cB-Sigma/iec60870 |
+|---|:---:|:---:|:---:|:---:|
+| Everything in the table above except the rows below | ✅ | ✅ | ✅ | ✅ |
+| Commands with time tag | ✅ | ✅ | — the stack drops them | ✅ |
+| File download, reference as server (`GetFile`) | ✅ | — no file server | — | ✅ |
+| File download, reference as client (`FileServer`) | ✅ | ✅ | — | ✅ |
+| IEC 62351-5, both directions | — | — | — | ✅ |
 
 ## Limitations
 
-- **No IEC 62351-5 application-layer security.** Its type identifications
-  are named and carried as raw payload, the procedures are not implemented;
-  see [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
-  Use TLS with client certificates.
+- **IEC 62351-5 is verified against one other implementation.** The
+  application-layer security was derived from cB-Sigma/iec60870, not from
+  the IEC documents, and is tested against it in process
+  (`make test-cbsigma`) and through its container image; no third
+  implementation or certified test equipment has checked either. No
+  broadcast key, no IEC 62351-8 tokens, no secp256k1, X448 or brainpool.
+  See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
 - **File transfer** covers download, upload and the directory. Upload and
   the directory are verified by this repository's own tests only: no
   reference stack offers them through the interop images yet. File deletion
