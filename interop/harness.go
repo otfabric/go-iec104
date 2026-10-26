@@ -137,6 +137,16 @@ const (
 	featSecure             = "secureAuthentication"
 )
 
+// knownReadBug reports whether a is built on j60870 1.8.0, which cannot
+// decode a read command (C_RD_NA_1) and closes the connection when it
+// receives one: as a station on any read, as a controlling station when a
+// read is refused. iec104-interop lists the same bug in tests/known-bugs.tsv.
+func (a adapter) knownReadBug(t testing.TB) bool {
+	t.Helper()
+	caps := a.capabilities(t)
+	return caps.Upstream.Name == "j60870" && caps.Upstream.Version == "1.8.0"
+}
+
 // has reports whether the image declares a feature. A feature an image does
 // not mention is one it does not have, except dataTransferEvents: the
 // images of iec104-interop v0.1.0, released before that feature was named,

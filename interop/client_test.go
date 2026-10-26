@@ -196,6 +196,12 @@ func TestClientRead(t *testing.T) {
 		c := dial(t, srv.addr)
 		ca := fx.Station.CommonAddr
 
+		if a.knownReadBug(t) {
+			if _, err := c.Read(ctx, ca, fx.Points[0].IOA); err == nil {
+				t.Errorf("known bug of %s did not reproduce: the read was answered", a.name)
+			}
+			t.Skipf("known bug of %s: it closes the connection on a read command", a.name)
+		}
 		for _, p := range fx.Points {
 			got, err := c.Read(ctx, ca, p.IOA)
 			if err != nil {
@@ -302,6 +308,10 @@ func TestClientCommands(t *testing.T) {
 						e["ioa"] == float64(tt.command.Address()) && e["select"] == false
 				})
 				// And a later read agrees.
+				if a.knownReadBug(t) {
+					t.Logf("not read back: %s closes the connection on a read command", a.name)
+					return
+				}
 				got, err := c.Read(ctx, ca, tt.target)
 				if err != nil {
 					t.Fatalf("Read: %v", err)
