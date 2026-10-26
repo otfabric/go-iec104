@@ -65,13 +65,15 @@ The library provides:
 
 ## go-iec104 vs lib60870, j60870 and wendy512/iec104
 
-go-iec104 is tested against three other implementations (see
+go-iec104 is tested against four other implementations (see
 [Interop tests](#interop-tests)):
 [MZ Automation lib60870-C](https://github.com/mz-automation/lib60870),
-[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/) and
+[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/),
 [wendy512/iec104](https://github.com/wendy512/iec104) on its engine
-go-iecp5. All are good libraries; this table shows where the four differ so
-you can pick the right one for your project.
+go-iecp5, and [cB-Sigma/iec60870](https://github.com/cB-Sigma/iec60870), the
+reference for IEC 62351-5. All are good libraries; this table compares
+go-iec104 with the first three, to help you pick the right one for your
+project.
 
 | Capability | otfabric/go-iec104 | lib60870-C | j60870 | wendy512/iec104 |
 |---|:---:|:---:|:---:|:---:|
@@ -102,7 +104,7 @@ you can pick the right one for your project.
 | Metrics hooks | ✅ | — raw message callback | — | — |
 | Threadless / single-loop operation | — by design ² | ✅ | — | — |
 | Dependencies | none | none (mbedTLS optional) | none | one (`spf13/cast`) besides its engine |
-| Cross-tested against other stacks in CI | ✅ against all three | — not documented | — not documented | — not documented |
+| Cross-tested against other stacks in CI | ✅ against these three and cB-Sigma/iec60870 | — not documented | — not documented | — not documented |
 
 ¹ IEC 60870-5-101 is a different companion standard with its own serial link
 layer (FT 1.2 framing, balanced and unbalanced procedures). It belongs in a
@@ -501,10 +503,11 @@ errors, protocol violations) and is covered by the scripted-peer tests of
 
 ## Interop tests
 
-The `interop` package tests go-iec104 against three independent
+The `interop` package tests go-iec104 against four independent
 implementations, [MZ Automation lib60870-C](https://github.com/mz-automation/lib60870),
-[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/) and
-[wendy512/iec104](https://github.com/wendy512/iec104) on its engine go-iecp5,
+[OpenMUC j60870](https://www.openmuc.org/iec-60870-5-104/),
+[wendy512/iec104](https://github.com/wendy512/iec104) on its engine go-iecp5
+and [cB-Sigma/iec60870](https://github.com/cB-Sigma/iec60870),
 packaged as container images by [otfabric/iec104-interop](https://github.com/otfabric/iec104-interop).
 
 ```sh
@@ -573,8 +576,9 @@ image lacks:
   and the query log have their types in the codec but no procedure.
 - **The event queue is in memory.** It survives a control centre that is
   away, not a restart of the station.
-- **Verified against three third-party stacks**, lib60870-C, j60870 and
-  wendy512/iec104 (see [Interop tests](#interop-tests)); not against certified test equipment or
+- **Verified against four third-party stacks**, lib60870-C, j60870,
+  wendy512/iec104 and cB-Sigma/iec60870, the last also for IEC 62351-5 (see
+  [Interop tests](#interop-tests)); not against certified test equipment or
   field devices.
 
 Details in [INTEROPERABILITY.md](INTEROPERABILITY.md).
