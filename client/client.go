@@ -222,9 +222,14 @@ func (c *Client) connect(ctx context.Context) error {
 		NotReady: sec.ErrNotReady,
 	})
 
+	// The link becomes current and "stopped" is queued in one step: from
+	// here on StartDT can run on another goroutine, and a state read after
+	// it would skip "stopped".
+	c.notifyMu.Lock()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+		c.notifyMu.Unlock()
 		close(ready)
 		_ = l.Close()
 		return iec104.ErrClosed
@@ -233,9 +238,14 @@ func (c *Client) connect(ctx context.Context) error {
 	c.last = l
 	c.dispatching.Store(l)
 	c.remote = remote
+	stopped := l.Err() == nil && c.state != iec104.StateStopped
+	if stopped {
+		c.state = iec104.StateStopped
+	}
 	c.mu.Unlock()
 	close(ready)
-	c.syncState(l)
+	c.notify(stopped, notice{iec104.StateStopped, nil})
+	c.at("link-published")
 
 	if c.opts.autoStart {
 		if err := l.StartDT(ctx); err != nil {
