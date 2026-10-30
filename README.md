@@ -42,7 +42,7 @@ The library provides:
   client and as server, against MZ Automation lib60870-C, OpenMUC j60870 and
   wendy512/iec104
 
-**Docs:** [API.md](API.md) (public API) · [ARCHITECTURE.md](ARCHITECTURE.md) (packages, goroutines, protocol machine) · [INTEROPERABILITY.md](INTEROPERABILITY.md) (what is implemented, clause by clause) · [ERRORS.md](ERRORS.md) (error semantics) · [OBSERVABILITY.md](OBSERVABILITY.md) (logging and metrics) · [SECURITY.md](SECURITY.md) · [RELEASE.md](RELEASE.md) (changelog)
+**Docs:** [API.md](API.md) (public API) · [ARCHITECTURE.md](ARCHITECTURE.md) (packages, goroutines, protocol machine) · [INTEROPERABILITY.md](INTEROPERABILITY.md) (what is implemented, clause by clause) · [ERRORS.md](ERRORS.md) (error semantics) · [OBSERVABILITY.md](OBSERVABILITY.md) (logging and metrics) · [TESTING.md](TESTING.md) (test tiers) · [docs/FEATURE-STATUS.md](docs/FEATURE-STATUS.md) (features and their evidence) · [SECURITY.md](SECURITY.md) · [RELEASE.md](RELEASE.md) (changelog)
 
 ## Table of contents
 
@@ -462,6 +462,9 @@ Both take `-debug` to log every APDU.
 ```sh
 make check      # format, lint, vet, vulnerability scan, tests, coverage
 make test       # tests with the race detector
+make e2e        # end-to-end suite only
+make coverage-check  # fail below the 90% coverage floor
+make cross      # cross-compile without cgo
 make fuzz       # codec fuzz targets (FUZZTIME=30s each)
 make test-cbsigma  # IEC 62351-5 against cB-Sigma/iec60870 (Go 1.26)
 make bench      # codec benchmarks
