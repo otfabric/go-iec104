@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   release:
-    uses: otfabric/.github/.github/workflows/go-package-release.yml@v3.1.1
+    uses: otfabric/.github/.github/workflows/go-package-release.yml@v3.2.0
     with:
       bump: ${{ inputs.bump }}
       release-name-prefix: go-iec104
