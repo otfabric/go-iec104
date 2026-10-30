@@ -9,9 +9,9 @@ None of this is a conformance claim: nothing is certified, and nothing has been 
 | go-iec104 | Go | iec104-interop | Supported |
 |---|---|---|---|
 | **v0.0.5** | 1.23 or later (CI: 1.23 to 1.26) | v0.3.1 | **yes** |
-| < v0.0.5 | 1.23 or later | older | no |
+| < v0.0.5 | 1.23 or later | older | best effort |
 
-Security fixes go into the latest version only ([SECURITY.md](../SECURITY.md)).
+Support policy: [SECURITY.md](../SECURITY.md#supported-versions).
 
 ## 2. Platforms
 
