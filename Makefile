@@ -4,7 +4,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test coverage cover bench fuzz check clean interop test-interop
+.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check cover bench fuzz cross check clean interop test-interop
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
@@ -91,9 +91,19 @@ test: ## Run the library tests with the race detector
 	@echo "Running tests"
 	@go test -count=1 -race $(TEST_PKGS)
 
+e2e: ## Run the end-to-end suite: go-iec104 client against go-iec104 server on loopback
+	@echo "Running end-to-end tests"
+	@go test -count=1 -race ./e2e/...
+
 coverage: ## Run tests with coverage on the library packages (writes coverage.out)
 	@echo "Running coverage"
 	@go test -count=1 -race -coverprofile=coverage.out -covermode=atomic $(TEST_PKGS)
+
+# Same floor as coverage-min in .github/workflows/ci.yml.
+COVER_MIN := 90
+coverage-check: coverage ## Fail if total coverage of the library packages is below COVER_MIN
+	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
+	awk -v t="$$total" -v m="$(COVER_MIN)" 'BEGIN { if (t+0 < m+0) { printf "coverage %.1f%% < %s%%\n", t, m; exit 1 } else printf "coverage %.1f%% >= %s%%\n", t, m }'
 
 cover: coverage ## Open coverage report in browser
 	@echo "Opening coverage report"
@@ -110,6 +120,12 @@ fuzz: ## Run the codec fuzz targets for FUZZTIME each (default 30s)
 	@go test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=$(FUZZTIME) ./apci
 	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./asdu
 	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./sec
+
+cross: ## Cross-compile without cgo (build only, the tests do not run there)
+	@for p in linux/amd64 linux/arm64 linux/arm darwin/arm64 windows/amd64; do \
+		echo "Building $$p"; \
+		CGO_ENABLED=0 GOOS=$${p%/*} GOARCH=$${p#*/} go build ./... || exit 1; \
+	done
 
 test-interop: ## Run the interop suite against the lib60870, OpenMUC, wendy512 and cB-Sigma reference images (needs Docker)
 	@echo "Running interop tests against $(IEC104_INTEROP_LIB60870_IMAGE), $(IEC104_INTEROP_OPENMUC_IMAGE), $(IEC104_INTEROP_WENDY512_IMAGE) and $(IEC104_INTEROP_CBSIGMA_IMAGE)"
