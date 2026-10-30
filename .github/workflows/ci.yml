@@ -13,8 +13,13 @@ permissions:
 
 jobs:
   ci:
-    uses: otfabric/.github/.github/workflows/go-ci.yml@v2
+    uses: otfabric/.github/.github/workflows/go-ci.yml@v2.1.0
     with:
+      run-govulncheck: true
+      coverage-min: "90"
+      fuzz-time: 10s
+      # Same scope as TEST_PKGS in the Makefile: the fixture and test helper packages have no tests of their own.
+      test-exclude-regex: "/example(s)?($|/)|/internal/(station|testutil)$"
       codecov-name: go-iec104
       go-versions: '["1.23", "1.24", "1.25", "1.26"]'
     secrets: inherit
