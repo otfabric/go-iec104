@@ -59,6 +59,35 @@ func station(t *testing.T) (*server.Server, string) {
 	return srv, ln.Addr().String()
 }
 
+// StartDT runs on another goroutine the moment the link is usable, before
+// connect has gone on. The application is still told "stopped" first: a
+// connection does not go from connecting to started.
+func TestStartDTAsTheLinkBecomesCurrent(t *testing.T) {
+	_, addr := station(t)
+	var c *Client
+	var once sync.Once
+	var log stateLog
+	started := make(chan error, 1)
+	c, err := New(addr, WithStateHandler(log.add), withFailpoint(func(name string) {
+		if name == "link-published" {
+			once.Do(func() { started <- c.StartDT(context.Background()) })
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	if got := log.String(); got != "css+" {
+		t.Fatalf("told %q, want connecting, stopped, started", got)
+	}
+}
+
 // The connection is lost and, before the client has reported that, the
 // application closes the client. Close must wait for the report: the
 // application is told once that it is disconnected, and not after Close.

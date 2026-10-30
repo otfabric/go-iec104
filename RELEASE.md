@@ -1,5 +1,22 @@
 # go-iec104 Releases
 
+## v0.1.0
+
+**Date:** 2026-10-30
+**Previous release:** v0.0.5
+
+## Summary
+
+A client always reports "stopped" before "started" on a new connection.
+
+## Changes
+
+### Fixes
+
+- **A state handler could be told "connecting" followed directly by "started".** The link was usable before "stopped" was reported, so a `StartDT` on another goroutine could finish first and the report would skip "stopped". Found by `TestChaos`, which failed intermittently on it.
+
+---
+
 ## v0.0.5
 
 **Date:** 2026-10-26
