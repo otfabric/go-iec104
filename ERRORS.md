@@ -9,6 +9,8 @@ How go-iec104 reports failures. For signatures see [API.md](API.md).
 - [Negative answers (`NegativeError`)](#negative-answers-negativeerror)
 - [Connection-fatal errors](#connection-fatal-errors)
 - [Codec errors](#codec-errors)
+- [Application-layer security errors](#application-layer-security-errors)
+- [File transfer errors](#file-transfer-errors)
 - [Context and timeouts](#context-and-timeouts)
 - [Retries](#retries)
 - [What is not an error](#what-is-not-an-error)
@@ -113,6 +115,27 @@ Returned by `asdu.Encode`/`Decode` and by every method that encodes an ASDU
 wrapped in `iec104.ErrProtocol`.
 
 An encode error never touches the connection: nothing was sent.
+
+## Application-layer security errors
+
+Package `sec` (IEC 62351-5) has its own sentinels. They are usually wrapped with detail.
+
+| Sentinel | Meaning |
+|----------|---------|
+| `sec.ErrMessage` | A security message cannot be encoded or decoded: a field out of range, a wrong length, a type or cause not permitted in its direction |
+| `sec.ErrNotReady` | Application data cannot be protected yet: no session keys, or the controlling station holds its data back while it changes them. Wait for `Endpoint.Changed` and try again |
+| `sec.ErrUnsecured` | An ordinary ASDU arrived on a connection the A-Profile applies to. It is discarded |
+| `sec.ErrAuthentication` | A MAC or AEAD tag does not verify, or wrapped keys do not unwrap. The message is discarded |
+| `sec.ErrReplay` | Secure Data with a sequence number not above the last one accepted. It is discarded |
+| `sec.ErrUnexpected` | A security message the state machine does not expect now, or with association IDs that do not match. It is discarded |
+| `sec.ErrCertificate` | A remote certificate that is invalid (wrong curve, outside its validity period, bad signature) or not authorized by `Trust`, or a local one that cannot be used |
+| `sec.ErrAlgorithm` | The remote station selected an algorithm this station does not support or accept |
+| `sec.ErrProcedure` | A Station Association or Session Key Change failed: the remote station repeatedly did not answer within the expected reply time |
+| `sec.ErrConfig` | A `Config` an `Endpoint` cannot run with |
+
+## File transfer errors
+
+`server.ErrFileNotAcknowledged` is reported to `FileServer.OnDone` when the controlling station answers a section or the file with a negative acknowledgement, or abandons the transfer.
 
 ## Context and timeouts
 

@@ -85,6 +85,17 @@ func adapters(t testing.TB) []adapter {
 	return out
 }
 
+// skipNoReference skips a test that no selected reference can run. Where the
+// full set of references runs, IEC104_REQUIRE_INTEROP=1 makes that a failure,
+// so that a new image that drops a capability cannot silently end a test.
+func skipNoReference(t testing.TB, why string) {
+	t.Helper()
+	if os.Getenv("IEC104_REQUIRE_INTEROP") == "1" {
+		t.Fatalf("IEC104_REQUIRE_INTEROP=1: %s", why)
+	}
+	t.Skipf("%s (set IEC104_REQUIRE_INTEROP=1 to fail instead)", why)
+}
+
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

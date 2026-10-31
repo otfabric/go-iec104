@@ -4,7 +4,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check cover bench fuzz cross check clean interop test-interop
+.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check coverage-pkg-check coverpkg-check cover bench fuzz chaos cross check clean interop test-interop
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
@@ -22,6 +22,10 @@ GOFMT_CI = $(shell GOTOOLCHAIN=go$(GO_MOD_VERSION).0 go env GOROOT)/bin/gofmt
 BIN_DIR := bin
 # Library packages: tests and coverage (exclude examples and test helpers)
 TEST_PKGS := $(shell go list ./... | grep -v '/examples' | grep -v '/internal/testutil' | grep -v '/internal/station')
+
+# Coverage counts these production packages, measured together, so that the
+# e2e suite counts for the packages it exercises. Exclusions: TESTING.md.
+COVER_PKGS := $(shell go list ./... | grep -v -e '/examples' -e '/internal/testutil' -e '/internal/station' -e '/e2e' -e '/interop' | paste -sd, -)
 
 # Build tag of the interop package (excluded from default ./... builds).
 INTEROP_TAGS := interop
@@ -97,13 +101,25 @@ e2e: ## Run the end-to-end suite: go-iec104 client against go-iec104 server on l
 
 coverage: ## Run tests with coverage on the library packages (writes coverage.out)
 	@echo "Running coverage"
-	@go test -count=1 -race -coverprofile=coverage.out -covermode=atomic $(TEST_PKGS)
+	@go test -count=1 -race -coverprofile=coverage.out -covermode=atomic -coverpkg=$(COVER_PKGS) $(TEST_PKGS)
 
 # Same floor as coverage-min in .github/workflows/ci.yml.
 COVER_MIN := 90
+# Per-package floor (TEST-012): the lowest package measures 94.6 %. Needs the
+# -coverpkg coverage.out of `make coverage`.
+COVER_PKG_MIN := 90
 coverage-check: coverage ## Fail if total coverage of the library packages is below COVER_MIN
 	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
 	awk -v t="$$total" -v m="$(COVER_MIN)" 'BEGIN { if (t+0 < m+0) { printf "coverage %.1f%% < %s%%\n", t, m; exit 1 } else printf "coverage %.1f%% >= %s%%\n", t, m }'
+
+coverage-pkg-check: coverage ## Fail when a package is below COVER_PKG_MIN
+	@awk -v m="$(COVER_PKG_MIN)" 'NR > 1 { n[$$1] = $$2; if ($$3 > 0) h[$$1] = 1 } \
+	END { for (k in n) { p = k; sub(/\/[^\/]*$$/, "", p); s[p] += n[k]; if (k in h) c[p] += n[k] } \
+	for (p in s) { v = 100 * c[p] / s[p]; if (v < m) { printf "%s: %.1f%% < %s%%\n", p, v, m; bad = 1 } } exit bad }' coverage.out
+
+coverpkg-check: ## Fail if CI's coverpkg differs from COVER_PKGS
+	@ci=$$(sed -nE 's/^ *coverpkg: *"?([^"]*)"?/\1/p' .github/workflows/ci.yml | head -1); \
+	[ "$$ci" = "$(COVER_PKGS)" ] || { echo "ci.yml coverpkg differs from COVER_PKGS"; exit 1; }
 
 cover: coverage ## Open coverage report in browser
 	@echo "Opening coverage report"
@@ -115,11 +131,20 @@ bench: ## Run the codec benchmarks
 
 # Duration each fuzz target runs. Override with FUZZTIME=... (e.g. FUZZTIME=5m).
 FUZZTIME ?= 30s
-fuzz: ## Run the codec fuzz targets for FUZZTIME each (default 30s)
+fuzz: ## Run every Fuzz target for FUZZTIME (targets discovered, never listed)
 	@echo "Fuzzing (FUZZTIME=$(FUZZTIME))"
-	@go test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=$(FUZZTIME) ./apci
-	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./asdu
-	@go test -run='^$$' -fuzz='^FuzzDecode$$' -fuzztime=$(FUZZTIME) ./sec
+	@for pkg in $(TEST_PKGS); do \
+		for t in $$(go test -list '^Fuzz' $$pkg | grep '^Fuzz'); do \
+			echo "fuzz $$pkg $$t"; \
+			go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) $$pkg || exit 1; \
+		done; \
+	done
+
+# Seconds of each chaos seed and number of seeds. The defaults are the nightly run's.
+CHAOS_SECONDS ?= 30
+CHAOS_SEEDS ?= 20
+chaos: ## Run the chaos test for CHAOS_SEEDS seeds of CHAOS_SECONDS each
+	@E2E_CHAOS_SECONDS=$(CHAOS_SECONDS) E2E_CHAOS_SEEDS=$(CHAOS_SEEDS) go test -count=1 -race -timeout=60m -run '^TestChaos$$' ./e2e/
 
 cross: ## Cross-compile without cgo (build only, the tests do not run there)
 	@for p in linux/amd64 linux/arm64 linux/arm darwin/arm64 windows/amd64; do \
@@ -141,7 +166,7 @@ test-cbsigma: ## Run the IEC 62351-5 differential tests against cB-Sigma/iec6087
 	@echo "Running the application-layer security tests against cB-Sigma/iec60870"
 	@cd interop/cbsigma && go test -count=1 -race ./...
 
-check: fmt fmt-check lint lint-ci vet vuln test coverage examples ## Run format + lint + vet + vuln + test
+check: fmt fmt-check lint lint-ci vet vuln test coverpkg-check coverage-pkg-check examples ## Run format + lint + vet + vuln + test + per-package coverage
 
 clean: ## Remove generated binaries and coverage artifacts
 	@echo "Cleaning up"
