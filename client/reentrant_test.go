@@ -143,7 +143,9 @@ func TestReentrantCloseFromHandlerStopsReconnecting(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	if err := c.Connect(context.Background()); err != nil {
+	// The station sends as soon as data transfer starts, so the Handler can
+	// close the client before Connect returns: Connect then reports ErrClosed.
+	if err := c.Connect(context.Background()); err != nil && !errors.Is(err, iec104.ErrClosed) {
 		t.Fatal(err)
 	}
 	testutil.Eventually(t, "closed from the Handler", func() bool {
