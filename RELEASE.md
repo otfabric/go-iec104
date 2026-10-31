@@ -1,5 +1,16 @@
 # go-iec104 Releases
 
+## v0.1.1
+
+**Date:** 2026-10-31
+**Previous release:** v0.1.0
+
+### Fixed
+
+- `Close` during `Connect`, after the dial, could return `ErrConnectFailed` wrapping `context.Canceled`. It returns `ErrClosed`.
+
+---
+
 ## v0.1.0
 
 **Date:** 2026-10-30
