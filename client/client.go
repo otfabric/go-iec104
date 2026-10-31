@@ -177,10 +177,7 @@ func (c *Client) connect(ctx context.Context) error {
 
 	conn, err := c.dial(ctx)
 	if err != nil {
-		if c.isClosed() {
-			return iec104.ErrClosed
-		}
-		return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, c.addr, err)
+		return c.connectFailed(c.addr, err)
 	}
 	remote := conn.RemoteAddr()
 	if m := c.opts.metrics; m != nil {
@@ -251,13 +248,13 @@ func (c *Client) connect(ctx context.Context) error {
 		if err := l.StartDT(ctx); err != nil {
 			c.detach(l)
 			_ = l.Close()
-			return fmt.Errorf("%w: STARTDT %s: %w", iec104.ErrConnectFailed, c.addr, err)
+			return c.connectFailed("STARTDT "+c.addr, err)
 		}
 		if ep := c.opts.security; ep != nil {
 			if err := waitSecure(ctx, ep, l); err != nil {
 				c.detach(l)
 				_ = l.Close()
-				return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, c.addr, err)
+				return c.connectFailed(c.addr, err)
 			}
 		}
 	}
@@ -297,6 +294,15 @@ func (c *Client) security() link.Security {
 		return nil
 	}
 	return c.opts.security
+}
+
+// connectFailed is what Connect reports for err: ErrClosed when Close stopped
+// it, whichever of the canceled context and the closed link came first.
+func (c *Client) connectFailed(what string, err error) error {
+	if c.isClosed() {
+		return iec104.ErrClosed
+	}
+	return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, what, err)
 }
 
 // waitSecure waits until ep has a secure session on l, or fails with why it

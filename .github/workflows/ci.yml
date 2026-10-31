@@ -21,8 +21,22 @@ jobs:
       # Same scope as TEST_PKGS in the Makefile: the fixture and test helper packages have no tests of their own.
       test-exclude-regex: "/example(s)?($|/)|/internal/(station|testutil)$"
       codecov-name: go-iec104
+      # Coverage across the production packages, as make coverage measures it: the
+      # e2e suite exercises them. make coverpkg-check keeps it equal to COVER_PKGS.
+      coverpkg: github.com/otfabric/go-iec104,github.com/otfabric/go-iec104/apci,github.com/otfabric/go-iec104/asdu,github.com/otfabric/go-iec104/client,github.com/otfabric/go-iec104/internal/link,github.com/otfabric/go-iec104/internal/logx,github.com/otfabric/go-iec104/sec,github.com/otfabric/go-iec104/server
       go-versions: '["1.23", "1.24", "1.25", "1.26"]'
     secrets: inherit
+
+  # go-ci gates the total; this gates each package (COVER_PKG_MIN).
+  coverage-floor:
+    name: Per-package coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - run: make coverpkg-check coverage-pkg-check
 
   # The self-contained examples must keep running as they are.
   examples:

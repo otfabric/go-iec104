@@ -1,0 +1,54 @@
+name: Extended
+run-name: "Extended (${{ github.event_name }}) on ${{ github.ref_name }}"
+
+# What is too long for every push: each fuzz target for minutes instead of
+# seconds, and the chaos test with many more seeds.
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Duration of each fuzz target
+        required: false
+        default: 5m
+      chaos_seeds:
+        description: Number of chaos seeds, of 30 seconds each
+        required: false
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Go 1.26 has a fuzz coordinator race at the end of -fuzztime
+      # (go.dev/issue/75804): fuzz on the current stable Go, as go-ci does.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: make fuzz FUZZTIME=${{ inputs.fuzztime || '5m' }}
+      - name: Upload the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/"
+          if-no-files-found: ignore
+
+  chaos:
+    name: Chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make chaos CHAOS_SEEDS=${{ inputs.chaos_seeds || '20' }}

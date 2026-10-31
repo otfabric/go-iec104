@@ -111,7 +111,7 @@ func secureAdapters(t *testing.T) []adapter {
 		}
 	}
 	if len(out) == 0 {
-		t.Skipf("no reference declares %s", featSecure)
+		skipNoReference(t, "no reference declares "+featSecure)
 	}
 	return out
 }

@@ -643,7 +643,7 @@ func TestClientGroup(t *testing.T) {
 		}
 	}
 	if len(all) == 0 {
-		t.Skip("no reference reports data transfer events")
+		skipNoReference(t, "no reference reports data transfer events")
 	}
 	first, second := all[0], all[len(all)-1]
 	fx := loadFixture(t, first)
