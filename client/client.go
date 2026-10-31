@@ -251,12 +251,18 @@ func (c *Client) connect(ctx context.Context) error {
 		if err := l.StartDT(ctx); err != nil {
 			c.detach(l)
 			_ = l.Close()
+			if c.isClosed() {
+				return iec104.ErrClosed
+			}
 			return fmt.Errorf("%w: STARTDT %s: %w", iec104.ErrConnectFailed, c.addr, err)
 		}
 		if ep := c.opts.security; ep != nil {
 			if err := waitSecure(ctx, ep, l); err != nil {
 				c.detach(l)
 				_ = l.Close()
+				if c.isClosed() {
+					return iec104.ErrClosed
+				}
 				return fmt.Errorf("%w: %s: %w", iec104.ErrConnectFailed, c.addr, err)
 			}
 		}
