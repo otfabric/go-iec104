@@ -50,6 +50,11 @@ const (
 // An adapter whose image is set to the empty string is left out.
 // IEC104_INTEROP_ADAPTERS restricts the run to a comma-separated subset.
 //
+// otfabric is go-iec104 itself, as published by otfabric/iec104-interop. It is
+// not a reference: it runs only when IEC104_INTEROP_OTFABRIC_IMAGE names an
+// image, and what it shows is compatibility between releases of this library,
+// not independent verification.
+//
 // The references do not all support the same: a test asks the image what it
 // declares (see [adapter.has]) and skips what it lacks.
 func adapters(t testing.TB) []adapter {
@@ -59,6 +64,7 @@ func adapters(t testing.TB) []adapter {
 		{"openmuc", getenv("IEC104_INTEROP_OPENMUC_IMAGE", defaultOpenMUCImage)},
 		{"wendy512", getenv("IEC104_INTEROP_WENDY512_IMAGE", defaultWendy512Image)},
 		{"cbsigma", getenv("IEC104_INTEROP_CBSIGMA_IMAGE", defaultCBSigmaImage)},
+		{"otfabric", os.Getenv("IEC104_INTEROP_OTFABRIC_IMAGE")},
 	}
 	only := os.Getenv("IEC104_INTEROP_ADAPTERS")
 	var out []adapter

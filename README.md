@@ -536,6 +536,11 @@ every push and pull request. To test against another build, set
 `IEC104_INTEROP_WENDY512_IMAGE` or `IEC104_INTEROP_CBSIGMA_IMAGE`; to run
 one stack only, `IEC104_INTEROP_ADAPTERS=lib60870`.
 
+The Self-interop workflow, run by hand, runs a commit against the latest
+published go-iec104 (`iec104-interop-otfabric:latest`). It finds a change on the
+wire that breaks an earlier release. A pass is not independent verification: it
+is go-iec104 on both sides.
+
 cB-Sigma/iec60870 is the only reference with IEC 62351-5: the suite runs
 the scenarios above against it, and the application-layer security in both
 directions (certificates from an

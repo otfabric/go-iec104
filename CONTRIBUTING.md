@@ -40,6 +40,9 @@ make build
 
 # Run the interop suite against lib60870, OpenMUC j60870 and wendy512/iec104 (needs Docker)
 make interop
+
+# Against the latest published go-iec104 (the Self-interop workflow, run by hand)
+IEC104_INTEROP_ADAPTERS=otfabric IEC104_INTEROP_OTFABRIC_IMAGE=ghcr.io/otfabric/iec104-interop-otfabric:latest make interop
 ```
 
 Run `make` (or `make help`) for the full list of targets.
