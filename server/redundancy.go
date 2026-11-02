@@ -20,7 +20,10 @@ const DefaultEventQueue = 1024
 
 // RedundancyGroup declares a redundancy group of a controlled station: the
 // connections of one controlling station (or of several that back each
-// other up), of which one has data transfer started at a time.
+// other up), of which one has data transfer started at a time
+// (IEC 60870-5-104 clause 10). A STARTDT on another connection takes over:
+// the connection that was started is closed, so that nothing more is sent on
+// it. One in STOPDT stays up, as a standby.
 //
 // Each group has its own event queue, see [Server.Enqueue].
 type RedundancyGroup struct {
@@ -38,7 +41,9 @@ type RedundancyGroup struct {
 // connection belongs to the first group that allows its address; one that no
 // group allows is closed before any protocol exchange.
 //
-// Without this option there is one group, "default", for every client.
+// Without this option there is one group, "default", for every client. It is
+// only a queue: its connections are independent sessions, each with its own
+// STARTDT and STOPDT, and none is closed because another one started.
 func WithRedundancyGroups(groups ...RedundancyGroup) Option {
 	return func(o *options) { o.groups = groups }
 }
@@ -68,6 +73,9 @@ type group struct {
 	name  string
 	allow []netip.Prefix // empty: any client
 	limit int
+	// declared says the application named the group, which makes it one in
+	// the sense of clause 10; the "default" group is not.
+	declared bool
 
 	mu       sync.Mutex
 	queue    []*queued // oldest first
@@ -92,7 +100,8 @@ func newGroups(srv *Server, decl []RedundancyGroup, limit int) ([]*group, error)
 	if limit < 0 {
 		return nil, fmt.Errorf("%w: event queue size %d, want > 0", iec104.ErrInvalidOption, limit)
 	}
-	if len(decl) == 0 {
+	declared := len(decl) > 0
+	if !declared {
 		decl = []RedundancyGroup{{Name: "default"}}
 	}
 	seen := map[string]bool{}
@@ -103,7 +112,7 @@ func newGroups(srv *Server, decl []RedundancyGroup, limit int) ([]*group, error)
 				iec104.ErrInvalidOption, d.Name)
 		}
 		seen[d.Name] = true
-		g := &group{srv: srv, name: d.Name, limit: limit, wake: make(chan struct{}, 1)}
+		g := &group{srv: srv, name: d.Name, limit: limit, declared: declared, wake: make(chan struct{}, 1)}
 		for _, a := range d.Allow {
 			p, err := netip.ParsePrefix(a)
 			if err != nil {
@@ -233,8 +242,10 @@ func (g *group) releaseAll(s *Session) {
 // and events sent in the meantime must be attributed to the right period.
 
 // started makes s the active connection of the group. A connection that
-// was active before keeps its link but no longer receives queued events;
-// what it had not acknowledged is sent again on s.
+// was active before no longer receives queued events; what it had not
+// acknowledged is sent again on s. In a declared group it is also closed, here
+// and so before the STARTDT con of s is written: nothing goes out on it after
+// that. A connection that is stopping sends nothing new and may finish that.
 func (g *group) started(s *Session) {
 	g.mu.Lock()
 	prev := g.active
@@ -246,6 +257,9 @@ func (g *group) started(s *Session) {
 		g.cancelSend()
 	}
 	g.mu.Unlock()
+	if g.declared && prev != nil && prev != s && prev.transferring() {
+		prev.lk.Load().Drop()
+	}
 	g.signal()
 	// Not under mu: the logger is the application's.
 	if prev != nil && prev != s {

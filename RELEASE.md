@@ -1,5 +1,16 @@
 # go-iec104 Releases
 
+## v0.1.2
+
+**Date:** 2026-11-02
+**Previous release:** v0.1.1
+
+### Fixed
+
+- A takeover in a group named with `WithRedundancyGroups` left the old connection started. A STARTDT on another connection only moved the event queue: `Session.Started` was true on both, a request on the old connection was still answered, and when the new one stopped the queue went back to the old one. The old connection is now closed before the STARTDT con goes out; one in STOPDT stays up. The `default` group, used without that option, is not a redundancy group and keeps its independent sessions.
+
+---
+
 ## v0.1.1
 
 **Date:** 2026-10-31

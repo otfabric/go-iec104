@@ -226,9 +226,14 @@ The standard lets a controlled station serve several connections of one
 redundancy group, of which exactly one is started.
 
 - **Server**: `WithRedundancyGroups` assigns each connection to a group by
-  the client's address (one group for everyone by default). Each connection
-  has its own STARTDT/STOPDT state; the connection of a group that started
-  data transfer last is its active one. `Server.Enqueue` delivers events to
+  the client's address. Each connection has its own STARTDT/STOPDT state; the
+  connection of a group that started data transfer last is its active one, and
+  the one active before is closed, so that exactly one is started and nothing
+  more is sent on the other. Without that option there is one `default` group
+  for everyone, which is a queue and not a redundancy group: every client is
+  an independent session, and a STARTDT closes nothing, so with two clients
+  started the one that is not active still gets answers, and queued events when
+  the active one stops. `Server.Enqueue` delivers events to
   the active connection of every group, buffers them while there is none
   and repeats what was not acknowledged after a switchover.
 - **Client**: `client.Group` manages a redundancy group: every connection
