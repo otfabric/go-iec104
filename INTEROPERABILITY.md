@@ -326,7 +326,7 @@ result must not tell go-iec104 from it.
 Besides its own tests the library is run against four independent
 implementations, as client and as server, on every push. The reference
 builds are the images of
-[otfabric/iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1),
+[otfabric/iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0),
 pinned by digest:
 
 | Reference | Version | go-iec104 client → reference server | reference client → go-iec104 server |

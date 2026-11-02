@@ -28,17 +28,17 @@ type adapter struct {
 }
 
 // The reference images this version of go-iec104 is qualified against:
-// otfabric/iec104-interop v0.3.1 (lib60870-C v2.4.1, OpenMUC j60870 1.8.0,
+// otfabric/iec104-interop v0.5.0 (lib60870-C v2.4.1, OpenMUC j60870 1.8.0,
 // wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, cB-Sigma/iec60870 v0.3.0 with
 // IEC 62351-5), pinned by digest so that a run is reproducible. Moving to
 // another release of iec104-interop means changing these constants, and the
 // Makefile and the interop workflow follow.
 const (
-	interopRelease       = "v0.3.1"
-	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:70585582d81d84fda35cc6d9099b39f783e4afd5ef639116778eac8c6c8395c4"
-	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:7db0fb30ad3ed456b1fa006387920d35ebd804293da1489531a04cafaa600000"
-	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:8269dcbbd5e994bf8adf8de25f9c422df68d6c1bc2e54218ad2802103cb56640"
-	defaultCBSigmaImage  = "ghcr.io/otfabric/iec104-interop-cbsigma@sha256:4c05e091ef8fc41d6b24ff58edac0493d78452dc0d509f20416fde0908d250a2"
+	interopRelease       = "v0.5.0"
+	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:c1f0cc95e39316df8c182b887b933e0488c92845fedade00605aedc816a0af9a"
+	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:319061ebfddd5bd87893dc87d065ab091c8ac9f2a2f3ce57838b5b7c9663766f"
+	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:8b8c9314ceef122d29ff1bd56b98a971c3dc0585522d8b81586d99119297c397"
+	defaultCBSigmaImage  = "ghcr.io/otfabric/iec104-interop-cbsigma@sha256:43e8e0db63fe3ab49ccca659e1ade8bcced43b916ba2fca161b03cc35aa779a8"
 )
 
 // adapters returns the reference implementations to test against. The image

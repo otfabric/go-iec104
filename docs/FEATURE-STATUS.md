@@ -1,6 +1,6 @@
 # Feature status
 
-What go-iec104 implements and what evidence backs it. Status: go-iec104 v0.0.5, qualified against [iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1). The type identifications and causes, clause by clause, are in [INTEROPERABILITY.md](../INTEROPERABILITY.md); what is out of scope is in [LIMITATIONS.md](../LIMITATIONS.md).
+What go-iec104 implements and what evidence backs it. Status: go-iec104 v0.0.5, qualified against [iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0). The type identifications and causes, clause by clause, are in [INTEROPERABILITY.md](../INTEROPERABILITY.md); what is out of scope is in [LIMITATIONS.md](../LIMITATIONS.md).
 
 None of this is a conformance claim: nothing is certified, and nothing has been run against certified test equipment or field devices.
 

@@ -13,7 +13,7 @@ What go-iec104 does not do, or does only partly. The interoperability list, clau
 
 - Independently verified against lib60870-C, OpenMUC j60870, wendy512/iec104 and cB-Sigma/iec60870, at the versions and with the results in [INTEROPERABILITY.md](INTEROPERABILITY.md#verification-status).
 - IEC 62351-5 was derived from cB-Sigma/iec60870, not from the IEC documents, and is verified against that one implementation only.
-- File upload, the file directory, TLS, interrogation groups, a quality on bitstrings and server redundancy against another implementation: the `interop` suite has the tests, for every reference that declares each feature (container contract 1.3). The pinned images (iec104-interop v0.3.1) predate that contract, so there these tests skip and the features rest on this repository's own tests. The tests pass against candidate builds of iec104-interop; the pins follow its release. See [INTEROPERABILITY.md](INTEROPERABILITY.md#verification-status).
+- File upload, the file directory, TLS, interrogation groups, a quality on bitstrings and server redundancy against another implementation: the `interop` suite has the tests, for every reference that declares each feature (container contract 1.3). The pinned images (iec104-interop v0.5.0) predate that contract, so there these tests skip and the features rest on this repository's own tests. The tests pass against candidate builds of iec104-interop; the pins follow its release. See [INTEROPERABILITY.md](INTEROPERABILITY.md#verification-status).
 - Not verified against certified test equipment or field devices.
 - Certification: none.
 

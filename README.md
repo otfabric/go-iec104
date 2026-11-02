@@ -527,7 +527,7 @@ cloned or built here. Scenarios, expected values and assertions live in this
 repository.
 
 This version is qualified against
-[iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1)
+[iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0)
 (lib60870-C v2.4.1, j60870 1.8.0, wendy512/iec104 v1.0.4 on go-iecp5
 v1.2.6, cB-Sigma/iec60870 v0.3.0). The four images are pinned by digest in
 `interop/harness.go`, the Makefile and the Interop workflow, which runs on
