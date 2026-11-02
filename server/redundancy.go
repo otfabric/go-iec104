@@ -21,9 +21,16 @@ const DefaultEventQueue = 1024
 // RedundancyGroup declares a redundancy group of a controlled station: the
 // connections of one controlling station (or of several that back each
 // other up), of which one has data transfer started at a time
-// (IEC 60870-5-104 clause 10). A STARTDT on another connection takes over:
-// the connection that was started is closed, so that nothing more is sent on
-// it. One in STOPDT stays up, as a standby.
+// (IEC 60870-5-104 edition 2, clause 10, "Redundant connections"). A STARTDT
+// on another connection takes over: the connection that was started is
+// closed, so that nothing more is sent on it. Closing it is how this package
+// keeps one connection started, not a requirement taken from clause 10. One
+// in STOPDT stays up, as a standby.
+//
+// A client that is taken over and reconnects with STARTDT takes over in
+// turn. The standbys of a group reconnect without it, as
+// [github.com/otfabric/go-iec104/client.Group] does, or a client with
+// WithAutoStart(false).
 //
 // Each group has its own event queue, see [Server.Enqueue].
 type RedundancyGroup struct {
@@ -74,7 +81,8 @@ type group struct {
 	allow []netip.Prefix // empty: any client
 	limit int
 	// declared says the application named the group, which makes it one in
-	// the sense of clause 10; the "default" group is not.
+	// the sense of clause 10 of IEC 60870-5-104 edition 2; the "default"
+	// group is not.
 	declared bool
 
 	mu       sync.Mutex

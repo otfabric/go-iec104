@@ -19,7 +19,7 @@ What go-iec104 does not do, or does only partly. The interoperability list, clau
 
 ## Known deviations
 
-- **The `default` redundancy group is not one in the sense of clause 10.** Without `WithRedundancyGroups`, every client is an independent session that can be started next to the others: a STARTDT closes nothing, the one that is not active still gets answers, and when the active one stops the queue moves to another started one. A group named with `WithRedundancyGroups` has one started connection: a takeover closes the other.
+- **The `default` redundancy group is not one in the sense of IEC 60870-5-104 edition 2, clause 10 (redundant connections).** Without `WithRedundancyGroups`, every client is an independent session that can be started next to the others: a STARTDT closes nothing, the one that is not active still gets answers, and when the active one stops the queue moves to another started one. A group named with `WithRedundancyGroups` has one started connection: a takeover closes the other.
 
 - The client's activation confirmation wait does not extend to the activation termination of a command; the termination reaches the `Handler`.
 - A received ASDU that cannot be decoded is dropped without a negative answer.

@@ -149,8 +149,8 @@ func StartTLS(t testing.TB, fx *Fixture, cfg *tls.Config, opts ...server.Option)
 	return start(t, fx, cfg, opts...)
 }
 
-// StartGroup is Start with all connections in one redundancy group, of
-// IEC 60870-5-104 clause 10. A connection in STARTDT that gets a STOPDT act
+// StartGroup is Start with all connections in one redundancy group, in the
+// sense of IEC 60870-5-104 edition 2, clause 10 (redundant connections). A connection in STARTDT that gets a STOPDT act
 // queues one event, for the next connection to start: the single point with the
 // lowest address as it is then, without time tag, with cause 3. A takeover
 // queues nothing, and neither does a connection that ends.

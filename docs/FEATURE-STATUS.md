@@ -73,7 +73,7 @@ HMAC-SHA3-256 is present only when built with Go 1.24 or later (`sec/algorithms_
 | Feature | Status | E2E | Independent |
 |---|---|---|---|
 | Client redundancy group, failover, switchover | ✅ | `TestRedundancyGroup`, `TestSwitchoverStaysInStep` | one group across two reference stacks |
-| Server redundancy groups | ✅ | `TestServerRedundancyGroups` | none |
+| Server redundancy groups | ✅ | `TestServerRedundancyGroups`, `TestReconnectingStandbyDoesNotEvictActive`, `TestFailoverThenRejoinDoesNotEvict` | none |
 | Event queue with acknowledged delivery, in memory | ✅ | `TestEventQueue`, `TestEventQueueOverflow` | reference clients (`TestServerEventQueue`) |
 | Combined station on one connection | — | | |
 
