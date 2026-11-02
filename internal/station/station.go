@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/server"
@@ -26,14 +27,17 @@ type Station struct {
 	commands map[asdu.IOA]*stationCommand
 	clock    time.Time
 	files    []File                    // of the fixture
+	accepted []Upload                  // of the fixture
 	uploads  map[asdu.IOA]uploadedFile // delivered by controlling stations
+	started  map[uint64]bool           // sessions with data transfer started
 
 	Server *server.Server
 	Addr   string // host:port; the station listens on all interfaces
 }
 
-// FirstUploadIOA is the first address the station takes files at. Files
-// delivered there can be fetched again and appear in the directory.
+// FirstUploadIOA is the first address the station takes files at when the
+// fixture has no uploads. Files delivered can be fetched again and appear in
+// the directory.
 const FirstUploadIOA asdu.IOA = 40000
 
 // FixtureFileTime is the creation time the directory gives the files of the
@@ -65,8 +69,19 @@ func (st *Station) OpenFile(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA,
 }
 
 // AcceptFile implements server.FileSink.
-func (st *Station) AcceptFile(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, _ uint16, _ int) bool {
-	return ca == st.ca && ioa >= FirstUploadIOA
+func (st *Station) AcceptFile(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, length int) bool {
+	if ca != st.ca {
+		return false
+	}
+	if len(st.accepted) == 0 {
+		return ioa >= FirstUploadIOA
+	}
+	for _, u := range st.accepted {
+		if u.IOA == ioa && u.Name == name {
+			return length >= 1 && length <= u.MaxSize
+		}
+	}
+	return false
 }
 
 // StoreFile implements server.FileSink.
@@ -128,15 +143,64 @@ func Start(t testing.TB, fx *Fixture, opts ...server.Option) *Station {
 	return start(t, fx, nil, opts...)
 }
 
-// StartTLS is Start with TLS on the listener.
+// StartTLS is Start with TLS, by [server.WithTLS].
 func StartTLS(t testing.TB, fx *Fixture, cfg *tls.Config, opts ...server.Option) *Station {
 	t.Helper()
 	return start(t, fx, cfg, opts...)
 }
 
+// StartGroup is Start with all connections in one redundancy group, of
+// IEC 60870-5-104 clause 10. A connection in STARTDT that gets a STOPDT act
+// queues one event, for the next connection to start: the single point with the
+// lowest address as it is then, without time tag, with cause 3. A takeover
+// queues nothing, and neither does a connection that ends.
+func StartGroup(t testing.TB, fx *Fixture, opts ...server.Option) *Station {
+	t.Helper()
+	var st *Station
+	ready := make(chan struct{})
+	opts = append([]server.Option{
+		server.WithRedundancyGroups(server.RedundancyGroup{Name: GroupName}),
+		// Sessions report once the server exists, and a session can be
+		// accepted only after that; the station is set right after.
+		server.WithStateHandler(func(s *server.Session, state iec104.State, _ error) {
+			<-ready
+			st.follow(s, state)
+		}),
+	}, opts...)
+	st = start(t, fx, nil, opts...)
+	close(ready)
+	return st
+}
+
+// GroupName is the redundancy group of a station from [StartGroup].
+const GroupName = "station"
+
+// follow queues the event of a redundancy group when a started connection stops.
+func (st *Station) follow(s *server.Session, state iec104.State) {
+	st.mu.Lock()
+	was := st.started[s.ID()]
+	st.started[s.ID()] = state == iec104.StateStarted
+	if state == iec104.StateDisconnected {
+		delete(st.started, s.ID())
+	}
+	var ev *asdu.ASDU
+	if was && state == iec104.StateStopped {
+		for _, p := range st.points {
+			if p.Type == "M_SP_NA_1" {
+				ev = asdu.New(asdu.CauseSpontaneous, st.ca, p.object(asdu.Timestamp{}))
+				break
+			}
+		}
+	}
+	st.mu.Unlock()
+	if ev != nil {
+		_ = st.Server.Enqueue(ev)
+	}
+}
+
 func start(t testing.TB, fx *Fixture, tlsConfig *tls.Config, opts ...server.Option) *Station {
 	t.Helper()
-	st := &Station{ca: fx.Station.CommonAddr, commands: map[asdu.IOA]*stationCommand{}}
+	st := &Station{ca: fx.Station.CommonAddr, commands: map[asdu.IOA]*stationCommand{}, started: map[uint64]bool{}}
 	byIOA := map[asdu.IOA]*stationPoint{}
 	for _, p := range fx.Points {
 		sp := &stationPoint{Point: p}
@@ -169,29 +233,32 @@ func start(t testing.TB, fx *Fixture, tlsConfig *tls.Config, opts ...server.Opti
 	mux.HandleFunc(asdu.C_TS_TA_1, func(s *server.Session, req *asdu.ASDU) { _ = s.Confirm(st.own(req)) })
 	mux.Handle(server.HandlerFunc(st.command), server.ProcessCommands...)
 	if len(fx.Files) > 0 {
-		st.files, st.uploads = fx.Files, map[asdu.IOA]uploadedFile{}
+		st.files, st.accepted, st.uploads = fx.Files, fx.Uploads, map[asdu.IOA]uploadedFile{}
 		files := server.NewFileServer(st)
 		files.Sink, files.Directory = st, st.directory
 		mux.Handle(files, server.FileTypes...)
 	}
 
 	params := apci.DefaultParams()
-	srv, err := server.New(mux, append([]server.Option{
-		server.WithParams(params), server.WithCommonAddrs(st.ca)}, opts...)...)
-	if err != nil {
-		t.Fatal(err)
+	options := []server.Option{server.WithParams(params), server.WithCommonAddrs(st.ca)}
+	if tlsConfig != nil {
+		options = append(options, server.WithTLS(tlsConfig))
 	}
-	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	srv, err := server.New(mux, append(options, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Server = srv
-	st.Addr = ln.Addr().String()
-	if tlsConfig != nil {
-		ln = tls.NewListener(ln, tlsConfig)
-	}
-	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
+	go func() { _ = srv.ListenAndServe("0.0.0.0:0") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.Addr() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the station does not listen")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	st.Addr = srv.Addr().String()
 	return st
 }
 
@@ -242,14 +309,14 @@ func (p *stationPoint) object(tag asdu.Timestamp) asdu.InformationObject {
 
 // report builds the answer to an interrogation: the selected points in
 // address order, consecutive points of one type sharing an ASDU.
-func (st *Station) report(cause asdu.Cause, originator uint8, counters bool) []*asdu.ASDU {
+func (st *Station) report(cause asdu.Cause, originator uint8, selected func(*stationPoint) bool) []*asdu.ASDU {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	var out []*asdu.ASDU
 	var cur *asdu.ASDU
 	last := ""
 	for _, p := range st.points {
-		if (p.Type == "M_IT_NA_1") != counters {
+		if !selected(p) {
 			continue
 		}
 		if cur == nil || p.Type != last || len(cur.Objects) >= 20 {
@@ -267,12 +334,20 @@ func (st *Station) report(cause asdu.Cause, originator uint8, counters bool) []*
 func (st *Station) interrogation(s *server.Session, req *asdu.ASDU) {
 	req = st.own(req)
 	qoi := req.First().(asdu.Interrogation).Qualifier
+	selected := func(p *stationPoint) bool { return p.Type != "M_IT_NA_1" }
 	if qoi != asdu.QOIStation {
+		group := int(qoi) - int(asdu.QOIStation)
+		selected = func(p *stationPoint) bool { return p.InGroup(group) }
+	}
+	data := st.report(qoi.Cause(), req.Originator, selected)
+	// The groups are QOI 21..36, and a group without points has nothing to
+	// answer. Neither has any other qualifier: a point has no other group.
+	if qoi != asdu.QOIStation && len(data) == 0 {
 		_ = s.Negative(req)
 		return
 	}
 	_ = s.Confirm(req)
-	for _, a := range st.report(qoi.Cause(), req.Originator, false) {
+	for _, a := range data {
 		_ = s.Send(s.Context(), a)
 	}
 	_ = s.Terminate(req)
@@ -286,7 +361,7 @@ func (st *Station) counterInterrogation(s *server.Session, req *asdu.ASDU) {
 		return
 	}
 	_ = s.Confirm(req)
-	for _, a := range st.report(ci.Cause(), req.Originator, true) {
+	for _, a := range st.report(ci.Cause(), req.Originator, func(p *stationPoint) bool { return p.Type == "M_IT_NA_1" }) {
 		_ = s.Send(s.Context(), a)
 	}
 	_ = s.Terminate(req)

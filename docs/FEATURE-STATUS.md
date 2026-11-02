@@ -1,6 +1,6 @@
 # Feature status
 
-What go-iec104 implements and what evidence backs it. Status: go-iec104 v0.0.5, qualified against [iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1). The type identifications and causes, clause by clause, are in [INTEROPERABILITY.md](../INTEROPERABILITY.md); what is out of scope is in [LIMITATIONS.md](../LIMITATIONS.md).
+What go-iec104 implements and what evidence backs it. Status: go-iec104 v0.0.5, qualified against [iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0). The type identifications and causes, clause by clause, are in [INTEROPERABILITY.md](../INTEROPERABILITY.md); what is out of scope is in [LIMITATIONS.md](../LIMITATIONS.md).
 
 None of this is a conformance claim: nothing is certified, and nothing has been run against certified test equipment or field devices.
 
@@ -65,7 +65,7 @@ HMAC-SHA3-256 is present only when built with Go 1.24 or later (`sec/algorithms_
 |---|---|---|---|
 | Download, `Client.GetFile` | ✅ | `TestFileTransfer` | lib60870-C, cB-Sigma |
 | Download, `server.FileServer` | ✅ | `TestFileTransfer` | lib60870-C, j60870, cB-Sigma |
-| Upload, directory | ✅ | `TestFileUploadAndDirectory` | none: no pinned image offers them |
+| Upload, directory | ✅ | `TestFileUploadAndDirectory` | lib60870-C, j60870, cB-Sigma both ways; wendy512 as upload client and for the directory (`TestClientUpload`, `TestServerUpload`, `TestClientDirectory`, `TestServerDirectory`) |
 | File deletion, query log | ⚙ | none | none |
 
 ### Redundancy and events
@@ -101,8 +101,7 @@ Peer versions, digests and per-direction results are in [INTEROPERABILITY.md](..
 ## 5. Not verified
 
 - Certified test equipment, field devices and any conformance test.
-- TLS against any other implementation.
 - `t1` and `t2` behaviour against another implementation.
-- File upload and the directory against another implementation.
+- Redundancy over TLS against another implementation: iec104-interop has no cases for it.
 - IEC 62351-5 against anything other than cB-Sigma/iec60870.
 - Any platform other than Linux amd64, in CI.

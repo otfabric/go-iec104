@@ -205,6 +205,80 @@ func TestEventQueueFollowsSwitchover(t *testing.T) {
 	testutil.Eventually(t, "acknowledgement", func() bool { return srv.Pending("default") == 0 })
 }
 
+// A STARTDT on another connection of a declared group takes over: the
+// connection that was started gets nothing more, answers included, and the
+// queue does not go back to it when the new one stops.
+func TestTakeoverEndsThePreviousConnection(t *testing.T) {
+	srv, addr := serve(t, server.HandlerFunc(confirmAll), server.WithLogger(iec104.NopLogger()),
+		server.WithRedundancyGroups(server.RedundancyGroup{Name: "scada"}))
+	ctx := context.Background()
+	rxOld, rxNew := &events{}, &events{}
+	old := connect(t, addr, client.WithHandler(rxOld))
+	standby := connect(t, addr, client.WithAutoStart(false))
+	next := connect(t, addr, client.WithHandler(rxNew), client.WithAutoStart(false))
+	enqueue(t, srv, 1, 1)
+	testutil.Eventually(t, "the event on the started connection", func() bool { return isRange(rxOld.values(), 1, 1) })
+
+	if err := next.StartDT(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// When STARTDT con has arrived, the old connection is already closed on
+	// the station's side, so exactly one is started.
+	started := 0
+	for _, s := range srv.Sessions() {
+		if s.Started() {
+			started++
+		}
+	}
+	if started != 1 {
+		t.Errorf("%d sessions started after the takeover, want 1", started)
+	}
+	testutil.Eventually(t, "the old connection closed", func() bool { return old.State() == iec104.StateDisconnected })
+	if err := old.TestCommand(ctx, 1); err == nil {
+		t.Error("a request on the connection taken over was answered")
+	}
+	if st := standby.State(); st != iec104.StateStopped {
+		t.Errorf("the connection in STOPDT is %v, want it up and stopped", st)
+	}
+
+	enqueue(t, srv, 2, 2)
+	// Event 1 comes again on the new connection when the old one had not
+	// acknowledged it yet.
+	testutil.Eventually(t, "the event on the new connection", func() bool {
+		got := rxNew.values()
+		return len(got) > 0 && got[len(got)-1] == 2
+	})
+	if err := next.StopDT(ctx); err != nil {
+		t.Fatal(err)
+	}
+	enqueue(t, srv, 3, 3)
+	time.Sleep(100 * time.Millisecond)
+	if got := rxOld.values(); !isRange(got, 1, 1) {
+		t.Errorf("the connection taken over received %v after the takeover", got)
+	}
+	if p := srv.Pending("scada"); p != 1 {
+		t.Errorf("Pending = %d with no connection started, want 1", p)
+	}
+}
+
+// The default group is only a queue: its connections are independent sessions.
+func TestDefaultGroupKeepsIndependentSessions(t *testing.T) {
+	srv, addr := serve(t, server.HandlerFunc(confirmAll))
+	first := connect(t, addr)
+	second := connect(t, addr)
+	testutil.Eventually(t, "both sessions", func() bool { return len(srv.Sessions()) == 2 })
+	for _, c := range []*client.Client{first, second} {
+		if err := c.TestCommand(context.Background(), 1); err != nil {
+			t.Errorf("TestCommand: %v", err)
+		}
+	}
+	for _, s := range srv.Sessions() {
+		if !s.Started() {
+			t.Errorf("session %d is not started", s.ID())
+		}
+	}
+}
+
 func TestEventQueueOverflow(t *testing.T) {
 	srv, addr := serve(t, server.HandlerFunc(confirmAll), server.WithEventQueue(3),
 		server.WithLogger(iec104.NopLogger()))

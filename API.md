@@ -341,7 +341,7 @@ var ErrServerClosed error
 | `WithParams(apci.Params)` | `apci.DefaultParams()` | `k`, `w`, `t1`..`t3` |
 | `WithASDUParams(asdu.Params)` | `asdu.IEC104` | ASDU layout and time zone of time tags |
 | `WithCommonAddrs(...asdu.CommonAddr)` | all | Stations served; others get "unknown common address" (broadcast always passes) |
-| `WithRedundancyGroups(...RedundancyGroup)` | one group `default` for every client | Which clients form a redundancy group; a client no group allows is turned away |
+| `WithRedundancyGroups(...RedundancyGroup)` | one group `default` for every client | Which clients form a redundancy group, of which one is started at a time; a client no group allows is turned away |
 | `WithEventQueue(int)` | 1024 | Events buffered per redundancy group; the oldest is dropped when full |
 | `WithMaxSessions(int)` | unlimited | Close connections beyond the limit on accept |
 | `WithAccept(func(net.Addr) bool)` | all | Filter connections before any exchange |
@@ -464,7 +464,12 @@ a time: the one that started data transfer last.
   controlling station can therefore see an event twice across a switchover,
   and does not miss one;
 - when a connection starts data transfer while another one of the group is
-  active, it takes over;
+  active, it takes over. In a group named with `WithRedundancyGroups` the one
+  that was active is closed before the STARTDT con goes out, so a group has one
+  started connection, and nothing more is sent on the old one; a connection in
+  STOPDT stays up. In the `default` group its connections are independent
+  sessions: the other one keeps its link and its answers, and only the queue
+  moves. When the active one stops, the queue moves to another started one;
 - a full queue drops its oldest event; `Dropped` counts them.
 
 `Pending(group)` is the number of events queued or awaiting acknowledgement.

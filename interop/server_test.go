@@ -5,7 +5,12 @@
 package interop
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,4 +332,256 @@ func TestServerEventQueue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// featureCase is one operation of a reference client against a go-iec104 station
+// with the fixture extended, as iec104-interop states it for its own stations in
+// tests/feature-cases.tsv.
+type featureCase struct {
+	args string
+	want string
+}
+
+// runCases runs cases against the station.
+func runCases(t *testing.T, a adapter, st *station.Station, cases []featureCase, dockerArgs ...string) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(strings.ReplaceAll(tc.args, " ", "_"), func(t *testing.T) {
+			r := runClientWith(t, a, st.Addr, dockerArgs, strings.Fields(tc.args)...)
+			if s := r.featureSummary(); s != tc.want {
+				if strings.HasPrefix(tc.args, "read") && a.knownReadBug(t) {
+					t.Skipf("known bug of %s, it cannot decode the mirrored C_RD_NA_1: got %s", a.name, s)
+				}
+				t.Errorf("%s client against go-iec104:\n got  %s\n want %s", a.name, s, tc.want)
+			}
+		})
+	}
+}
+
+// TestServerGroups: the reference clients interrogate the groups of a go-iec104
+// station, value by value.
+func TestServerGroups(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx := loadExtended(t, a)
+		st := station.Start(t, fx)
+		const ok = "exit=0 ok=true error=- conf=7 term=true asdus=C_IC_NA_1/7,"
+		const refused = "exit=1 ok=false error=negative-confirmation conf=7n term=false asdus=C_IC_NA_1/7"
+		runCases(t, a, st, []featureCase{
+			{"interrogate", ok + "M_SP_NA_1/20,M_DP_NA_1/20,M_BO_NA_1/20,M_ME_NB_1/20,M_ME_NC_1/20,C_IC_NA_1/10"},
+			{"interrogate --qoi 21", ok + "M_SP_NA_1/21,M_DP_NA_1/21,C_IC_NA_1/10"},
+			{"interrogate --qoi 22", ok + "M_BO_NA_1/22,C_IC_NA_1/10"},
+			{"interrogate --qoi 23", ok + "M_BO_NA_1/23,M_ME_NB_1/23,C_IC_NA_1/10"},
+			{"interrogate --qoi 36", ok + "M_ME_NB_1/36,C_IC_NA_1/10"},
+			{"interrogate --qoi 30", refused},
+			{"interrogate --qoi 21 --common-address 65535", ok + "M_SP_NA_1/21,M_DP_NA_1/21,C_IC_NA_1/10"},
+			{"interrogate --qoi 21 --common-address 7", "exit=1 ok=false error=negative-confirmation conf=46n term=false asdus=C_IC_NA_1/46"},
+		})
+		for _, group := range []int{1, 2, 3, 16} {
+			want := fx.ExpectedGroup(group)
+			if len(want) == 0 {
+				t.Fatalf("fixture extended has no point in group %d", group)
+			}
+			r := runClient(t, a, st.Addr, "interrogate", "--qoi", strconv.Itoa(20+group))
+			if got := observeResult(r, 20+group); !station.SameObserved(got, want) {
+				t.Errorf("group %d:\n got  %v\n want %v", group, got, want)
+			}
+		}
+		// The baseline has no group, so all of them are refused there.
+		base := station.Start(t, loadFixture(t, a))
+		if s := runClient(t, a, base.Addr, "interrogate", "--qoi", "21").summary(); s != refused {
+			t.Errorf("a group of a fixture without groups:\n got  %s\n want %s", s, refused)
+		}
+	}, featGroups, featBitstringQ)
+}
+
+// TestServerBitstringQuality: what a reference client reads from a go-iec104
+// station is the value and the quality of the fixture.
+func TestServerBitstringQuality(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx := loadExtended(t, a)
+		st := station.Start(t, fx)
+		var want []station.Observed
+		for _, o := range fx.Expected(false) {
+			if o.Type == "M_BO_NA_1" {
+				want = append(want, o)
+			}
+		}
+		if len(want) != 3 || want[0].Quality != "" || want[1].Quality != "OV IV" || want[2].Quality != "BL SB NT" {
+			t.Fatalf("fixture extended changed: %v", want)
+		}
+		var got []station.Observed
+		for _, o := range observeResult(runClient(t, a, st.Addr, "interrogate"), 20) {
+			if o.Type == "M_BO_NA_1" {
+				got = append(got, o)
+			}
+		}
+		if !station.SameObserved(got, want) {
+			t.Errorf("interrogation:\n got  %v\n want %v", got, want)
+		}
+		for _, w := range want {
+			r := runClient(t, a, st.Addr, "read", "--ioa", strconv.Itoa(int(w.IOA)))
+			if got := observeResult(r, 5); len(got) != 1 || got[0] != w {
+				t.Errorf("read %d: got %v, want %v (%s)", w.IOA, got, w, r.summary())
+			}
+		}
+	}, featBitstringQ)
+}
+
+// fileASDUsUp is what the file-put of n sections brings back from the station.
+func fileASDUsUp(n int) string {
+	return "F_SC_NA_1/13" + strings.Repeat(",F_SC_NA_1/13,F_AF_NA_1/13", n) + ",F_AF_NA_1/13"
+}
+
+// TestServerUpload: the reference clients send a file to a go-iec104 station,
+// which has what the fixture's rule says, and refuses what its uploads do not take.
+func TestServerUpload(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx := loadExtended(t, a)
+		up := fx.Uploads[0]
+		for _, tc := range []struct {
+			size, sectionSize, sections int
+		}{{1000, 1000, 1}, {5000, 2048, 3}, {up.MaxSize, 2048, 4}} {
+			t.Run(strconv.Itoa(tc.size), func(t *testing.T) {
+				st := station.Start(t, fx)
+				r := runClient(t, a, st.Addr, "file-put", "--ioa", strconv.Itoa(int(up.IOA)),
+					"--size", strconv.Itoa(tc.size), "--section-size", strconv.Itoa(tc.sectionSize))
+				want := fmt.Sprintf("exit=0 ok=true error=- conf= term=false asdus=%s file=%d/%d/%d",
+					fileASDUsUp(tc.sections), tc.size, tc.size, tc.sections)
+				if s := r.featureSummary(); s != want {
+					t.Errorf("file-put:\n got  %s\n want %s", s, want)
+				}
+				if r.File == nil || r.File.SHA256 != fileHash(up.IOA, tc.size) {
+					t.Errorf("file-put reports %+v, want sha256 %s", r.File, fileHash(up.IOA, tc.size))
+				}
+				got, ok := st.Uploaded(up.IOA)
+				if !ok {
+					t.Fatal("the station has no file")
+				}
+				sum := sha256.Sum256(got)
+				if h := hex.EncodeToString(sum[:]); !bytes.Equal(got, fileContent(up.IOA, tc.size)) || h != fileHash(up.IOA, tc.size) {
+					t.Errorf("the station has %d octets with sha256 %s, want %d with %s", len(got), h, tc.size, fileHash(up.IOA, tc.size))
+				}
+				// It is in the directory, and can be fetched again.
+				if a.has(t, featDirectoryClient) {
+					d := runClient(t, a, st.Addr, "file-dir")
+					want := []resultDirectory{{int(fx.Files[0].IOA), int(fx.Files[0].Name), fx.Files[0].Size, 0},
+						{int(fx.Files[1].IOA), int(fx.Files[1].Name), fx.Files[1].Size, 0},
+						{int(up.IOA), int(up.Name), tc.size, 32}}
+					if !slices.Equal(d.Directory, want) {
+						t.Errorf("directory: %+v, want %+v", d.Directory, want)
+					}
+				}
+				if a.has(t, featFileClient) {
+					g := runClient(t, a, st.Addr, "file-get", "--ioa", strconv.Itoa(int(up.IOA)), "--name", strconv.Itoa(int(up.Name)))
+					if !g.OK || g.File == nil || g.File.SHA256 != fileHash(up.IOA, tc.size) {
+						t.Errorf("file-get of the file sent: %s", g.featureSummary())
+					}
+				}
+			})
+		}
+
+		st := station.Start(t, fx)
+		const ok = "exit=1 ok=false error=negative-confirmation conf= term=false asdus=F_FR_NA_1/47 file="
+		runCases(t, a, st, []featureCase{
+			{"file-put --ioa 39999 --size 1000", ok + "1000/0/0"},
+			{"file-put --ioa 31000 --name 9 --size 1000", ok + "1000/0/0"},
+			{"file-put --ioa 31000 --size 8193 --section-size 2048", ok + "8193/0/0"},
+			{"file-put --ioa 30000 --size 1000", ok + "1000/0/0"},
+		})
+		for _, ioa := range []asdu.IOA{39999, 31000, 30000} {
+			if _, stored := st.Uploaded(ioa); stored {
+				t.Errorf("a refused upload is stored at %d", ioa)
+			}
+		}
+	}, featUploadClient)
+}
+
+// TestServerDirectory: a reference client lists the files of a go-iec104 station.
+func TestServerDirectory(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		const prefix = "exit=0 ok=true error=- conf= term=false asdus=F_DR_TA_1/5 directory="
+		runCases(t, a, station.Start(t, loadExtended(t, a)), []featureCase{{"file-dir", prefix + "30000:1:1000:0,30001:2:5000:32"}})
+		fx := loadFixture(t, a)
+		st := station.Start(t, fx)
+		runCases(t, a, st, []featureCase{{"file-dir", prefix + "30000:1:1000:0,30001:1:5000:32"}})
+		// Against the fixture, not a copy of it.
+		r := runClient(t, a, st.Addr, "file-dir")
+		if len(r.Directory) != len(fx.Files) {
+			t.Fatalf("directory: %+v, want the files of %+v", r.Directory, fx.Files)
+		}
+		for i, f := range fx.Files {
+			if e := r.Directory[i]; e.IOA != int(f.IOA) || e.NOF != int(f.Name) || e.LOF != f.Size {
+				t.Errorf("entry %d: %+v, want %+v", i, e, f)
+			}
+		}
+	}, featDirectoryClient)
+}
+
+// TestServerRedundancy: a reference client with two connections to a go-iec104
+// station in a redundancy group, switching over in both ways.
+func TestServerRedundancy(t *testing.T) {
+	const station1 = "C_IC_NA_1/7,M_SP_NA_1/20,M_DP_NA_1/20,M_BO_NA_1/20,M_ME_NB_1/20,M_ME_NC_1/20,C_IC_NA_1/10"
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx := loadExtended(t, a)
+		for _, tc := range []struct {
+			name, want, flags string
+		}{
+			{"stopdt", "exit=0 ok=true error=- conf=7,7 term=true asdus=" + station1 + ",M_SP_NA_1/3," + station1 + " redundancy=7/8/0/true", ""},
+			{"takeover", "exit=0 ok=true error=- conf=7,7 term=true asdus=" + station1 + "," + station1 + " redundancy=7/7/0/false", "--switchover takeover"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				st := station.StartGroup(t, fx)
+				r := runClient(t, a, st.Addr, append([]string{"redundancy"}, strings.Fields(tc.flags)...)...)
+				if s := r.featureSummary(); s != tc.want {
+					t.Errorf("%s client against go-iec104:\n got  %s\n want %s", a.name, s, tc.want)
+				}
+				if r.Redundancy == nil || r.Redundancy.Switchover != tc.name {
+					t.Errorf("redundancy: %+v", r.Redundancy)
+				}
+				if !r.Connected || !r.StartDT || !r.StopDT {
+					t.Errorf("connected %v, startdt %v, stopdt %v", r.Connected, r.StartDT, r.StopDT)
+				}
+				// The event of the last STOPDT waits for the next connection.
+				eventually(t, 5*time.Second, "one event left in the queue", func() bool {
+					return st.Server.Pending(station.GroupName) == 1
+				})
+			})
+		}
+		t.Run("event value", func(t *testing.T) {
+			// The event carries the state of the station. The command's
+			// connection ends without STOPDT, which queues nothing.
+			st := station.StartGroup(t, fx)
+			if r := runClient(t, a, st.Addr, "command", "--type", "C_SC_NA_1", "--ioa", "500", "--value", "false"); !r.OK {
+				t.Fatalf("command: %s", r.summary())
+			}
+			eventually(t, 5*time.Second, "the command's connection closed", func() bool { return len(st.Server.Sessions()) == 0 })
+			if p := st.Server.Pending(station.GroupName); p != 0 {
+				t.Errorf("Pending = %d after a connection ended, want 0", p)
+			}
+			r := runClient(t, a, st.Addr, "redundancy")
+			if !r.OK {
+				t.Fatalf("redundancy: %s", r.featureSummary())
+			}
+			want := fx.Expected(false)[0]
+			want.Value = false
+			got := observeResult(r, int(asdu.CauseSpontaneous))
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("queued events: %v, want %v", got, want)
+			}
+			for _, as := range r.ASDUs {
+				if as.Cot == int(asdu.CauseSpontaneous) && as.Originator != 0 {
+					t.Errorf("queued event with originator %d", as.Originator)
+				}
+			}
+		})
+		t.Run("no group", func(t *testing.T) {
+			// The same station without a group has no queue.
+			st := station.Start(t, fx)
+			r := runClient(t, a, st.Addr, "redundancy", "--timeout-ms", "2000")
+			want := "exit=1 ok=false error=timeout conf=7 term=true asdus=" + station1 + " redundancy=7/0/0/false"
+			if s := r.featureSummary(); s != want {
+				t.Errorf("%s client against go-iec104:\n got  %s\n want %s", a.name, s, want)
+			}
+		})
+	}, featRedundClient)
 }

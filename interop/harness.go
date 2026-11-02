@@ -28,17 +28,17 @@ type adapter struct {
 }
 
 // The reference images this version of go-iec104 is qualified against:
-// otfabric/iec104-interop v0.3.1 (lib60870-C v2.4.1, OpenMUC j60870 1.8.0,
+// otfabric/iec104-interop v0.5.0 (lib60870-C v2.4.1, OpenMUC j60870 1.8.0,
 // wendy512/iec104 v1.0.4 on go-iecp5 v1.2.6, cB-Sigma/iec60870 v0.3.0 with
 // IEC 62351-5), pinned by digest so that a run is reproducible. Moving to
 // another release of iec104-interop means changing these constants, and the
 // Makefile and the interop workflow follow.
 const (
-	interopRelease       = "v0.3.1"
-	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:70585582d81d84fda35cc6d9099b39f783e4afd5ef639116778eac8c6c8395c4"
-	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:7db0fb30ad3ed456b1fa006387920d35ebd804293da1489531a04cafaa600000"
-	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:8269dcbbd5e994bf8adf8de25f9c422df68d6c1bc2e54218ad2802103cb56640"
-	defaultCBSigmaImage  = "ghcr.io/otfabric/iec104-interop-cbsigma@sha256:4c05e091ef8fc41d6b24ff58edac0493d78452dc0d509f20416fde0908d250a2"
+	interopRelease       = "v0.5.0"
+	defaultLib60870Image = "ghcr.io/otfabric/iec104-interop-lib60870@sha256:c1f0cc95e39316df8c182b887b933e0488c92845fedade00605aedc816a0af9a"
+	defaultOpenMUCImage  = "ghcr.io/otfabric/iec104-interop-openmuc@sha256:319061ebfddd5bd87893dc87d065ab091c8ac9f2a2f3ce57838b5b7c9663766f"
+	defaultWendy512Image = "ghcr.io/otfabric/iec104-interop-wendy512@sha256:8b8c9314ceef122d29ff1bd56b98a971c3dc0585522d8b81586d99119297c397"
+	defaultCBSigmaImage  = "ghcr.io/otfabric/iec104-interop-cbsigma@sha256:43e8e0db63fe3ab49ccca659e1ade8bcced43b916ba2fca161b03cc35aa779a8"
 )
 
 // adapters returns the reference implementations to test against. The image
@@ -149,6 +149,18 @@ const (
 	featFileServer         = "fileServer"
 	featFileClient         = "fileClient"
 	featSecure             = "secureAuthentication"
+	// Container contract 1.3. An image from before it does not mention them,
+	// which means false, so its tests skip.
+	featGroups          = "groupInterrogation"
+	featBitstringQ      = "pointQualityOnBitstring"
+	featTLSServer       = "tlsServer"
+	featTLSClient       = "tlsClient"
+	featUploadServer    = "fileUploadServer"
+	featUploadClient    = "fileUploadClient"
+	featDirectoryServer = "fileDirectoryServer"
+	featDirectoryClient = "fileDirectoryClient"
+	featRedundServer    = "redundancyServer"
+	featRedundClient    = "redundancyClient"
 )
 
 // knownReadBug reports whether a is built on j60870 1.8.0, which cannot
@@ -191,6 +203,20 @@ func (a adapter) need(t testing.TB, features ...string) {
 		if !a.has(t, f) {
 			t.Skipf("%s does not declare %s", a.name, f)
 		}
+	}
+}
+
+// forEachAdapter runs f for every adapter that declares the features, and
+// skips the others. It does not use skipNoReference: the pinned images may
+// predate a feature altogether, and that must not fail a run that requires
+// references.
+func forEachAdapter(t *testing.T, f func(t *testing.T, a adapter), features ...string) {
+	t.Helper()
+	for _, a := range adapters(t) {
+		t.Run(a.name, func(t *testing.T) {
+			a.need(t, features...)
+			f(t, a)
+		})
 	}
 }
 
@@ -333,6 +359,11 @@ type result struct {
 	ASDUs   []resultASDU `json:"asdus"`
 	Secured *bool        `json:"secured"`
 
+	TLS        *bool             `json:"tls"`
+	File       *resultFile       `json:"file"`
+	Directory  []resultDirectory `json:"directory"`
+	Redundancy *resultRedundancy `json:"redundancy"`
+
 	exit int
 	raw  map[string]any
 }
@@ -350,6 +381,33 @@ type resultASDU struct {
 }
 
 type resultObject map[string]any
+
+// resultFile is what file-get and file-put report.
+type resultFile struct {
+	IOA      int    `json:"ioa"`
+	Name     int    `json:"name"`
+	Length   int    `json:"length"`
+	Received int    `json:"received"`
+	Sections int    `json:"sections"`
+	SHA256   string `json:"sha256"`
+}
+
+// resultDirectory is one entry of what file-dir reports.
+type resultDirectory struct {
+	IOA int `json:"ioa"`
+	NOF int `json:"nof"`
+	LOF int `json:"lof"`
+	SOF int `json:"sof"`
+}
+
+// resultRedundancy is what the operation redundancy reports.
+type resultRedundancy struct {
+	Switchover   string `json:"switchover"`
+	PrimaryASDUs int    `json:"primaryAsdus"`
+	StandbyASDUs int    `json:"standbyAsdus"`
+	StrayASDUs   int    `json:"strayAsdus"`
+	QueuedEvent  bool   `json:"queuedEvent"`
+}
 
 // summary states the outcome in one line: what the scenario tables expect.
 func (r *result) summary() string {
@@ -370,6 +428,29 @@ func (r *result) summary() string {
 	}
 	return fmt.Sprintf("exit=%d ok=%v error=%s conf=%s term=%v asdus=%s",
 		r.exit, r.OK, code, strings.Join(conf, ","), r.Terminated, strings.Join(asdus, ","))
+}
+
+// featureSummary is summary with what container contract 1.3 adds to the
+// document, in the form of tests/feature-cases.tsv of iec104-interop.
+func (r *result) featureSummary() string {
+	s := r.summary()
+	if r.TLS != nil {
+		s += fmt.Sprintf(" tls=%v", *r.TLS)
+	}
+	if r.File != nil {
+		s += fmt.Sprintf(" file=%d/%d/%d", r.File.Length, r.File.Received, r.File.Sections)
+	}
+	if r.raw["directory"] != nil {
+		var entries []string
+		for _, e := range r.Directory {
+			entries = append(entries, fmt.Sprintf("%d:%d:%d:%d", e.IOA, e.NOF, e.LOF, e.SOF))
+		}
+		s += " directory=" + strings.Join(entries, ",")
+	}
+	if rd := r.Redundancy; rd != nil {
+		s += fmt.Sprintf(" redundancy=%d/%d/%d/%v", rd.PrimaryASDUs, rd.StandbyASDUs, rd.StrayASDUs, rd.QueuedEvent)
+	}
+	return s
 }
 
 // normalized returns the document without what legitimately differs between

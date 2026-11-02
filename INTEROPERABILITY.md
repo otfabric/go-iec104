@@ -226,9 +226,14 @@ The standard lets a controlled station serve several connections of one
 redundancy group, of which exactly one is started.
 
 - **Server**: `WithRedundancyGroups` assigns each connection to a group by
-  the client's address (one group for everyone by default). Each connection
-  has its own STARTDT/STOPDT state; the connection of a group that started
-  data transfer last is its active one. `Server.Enqueue` delivers events to
+  the client's address. Each connection has its own STARTDT/STOPDT state; the
+  connection of a group that started data transfer last is its active one, and
+  the one active before is closed, so that exactly one is started and nothing
+  more is sent on the other. Without that option there is one `default` group
+  for everyone, which is a queue and not a redundancy group: every client is
+  an independent session, and a STARTDT closes nothing, so with two clients
+  started the one that is not active still gets answers, and queued events when
+  the active one stops. `Server.Enqueue` delivers events to
   the active connection of every group, buffers them while there is none
   and repeats what was not acknowledged after a switchover.
 - **Client**: `client.Group` manages a redundancy group: every connection
@@ -321,7 +326,7 @@ result must not tell go-iec104 from it.
 Besides its own tests the library is run against four independent
 implementations, as client and as server, on every push. The reference
 builds are the images of
-[otfabric/iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1),
+[otfabric/iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0),
 pinned by digest:
 
 | Reference | Version | go-iec104 client → reference server | reference client → go-iec104 server |
@@ -355,10 +360,23 @@ lib60870-C station with the content its fixture defines, and the lib60870-C
 and j60870 clients download from `FileServer`, whose answers they cannot
 tell, ASDU by ASDU, from those of the lib60870-C file server.
 
-File upload and the directory are verified by this repository's own tests
-only (client against server, and each against a scripted peer). The pinned
-reference images have no operation for them: lib60870-C can receive a file
-but has no directory, and the other two stacks have neither.
+Container contract 1.3 of iec104-interop adds interrogation groups, a quality
+on `M_BO_NA_1`, mutual TLS (IEC 62351-3), file upload, the file directory and
+redundancy groups (IEC 60870-5-104 clause 10). The images pinned above
+(v0.5.0) offer it wherever their upstream supports it. The suite reads the
+capabilities from the image under test and runs in both directions:
+
+| Feature | go-iec104 client → reference server | reference client → go-iec104 server |
+|---------|-------------------------------------|-------------------------------------|
+| Interrogation groups | `TestClientGroups`: lib60870-C, j60870, wendy512, cB-Sigma | `TestServerGroups`: all four |
+| Quality on `M_BO_NA_1` | `TestClientBitstringQuality`: all four (j60870 without read) | `TestServerBitstringQuality`: all four |
+| Mutual TLS, with certificates made when the test runs, and the wrong authority, no TLS on either side refused | `TestTLSClient`: lib60870-C, j60870, cB-Sigma | `TestTLSServer`: all four |
+| File upload, read back, refusals | `TestClientUpload`: lib60870-C, j60870, cB-Sigma | `TestServerUpload`: all four |
+| File directory | `TestClientDirectory`: all four | `TestServerDirectory`: all four |
+| Redundancy: STOPDT, takeover, queued event | `TestClientRedundancy`: lib60870-C, j60870, cB-Sigma | `TestServerRedundancy`: all four |
+
+wendy512 on go-iecp5 has no station over TLS, cannot receive a file and cannot
+follow a group of connections; its image says so and the tests skip.
 
 It has **not** been run against certified test equipment or field devices.
 Interoperability reports are welcome.

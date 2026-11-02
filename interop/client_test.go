@@ -39,6 +39,23 @@ func (r *recorder) reset() {
 	r.mu.Unlock()
 }
 
+// count returns how many recorded ASDUs satisfy match.
+func (r *recorder) count(match func(*asdu.ASDU) bool) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, a := range r.asdus {
+		if match(a) {
+			n++
+		}
+	}
+	return n
+}
+
+func anyASDU(*asdu.ASDU) bool { return true }
+
+func spontaneous(a *asdu.ASDU) bool { return a.Cause == asdu.CauseSpontaneous }
+
 // find returns the first recorded ASDU that satisfies match, waiting for it.
 func (r *recorder) find(t testing.TB, what string, match func(*asdu.ASDU) bool) *asdu.ASDU {
 	t.Helper()
@@ -718,4 +735,404 @@ func TestClientGroup(t *testing.T) {
 	}
 	interrogate("after switchover")
 	srvB.waitEvent(t, "data-transfer-stopped", func(e event) bool { return e["event"] == "data-transfer-stopped" })
+}
+
+// startExtended runs the reference server of a with the fixture extended.
+func startExtended(t *testing.T, a adapter, extra ...string) (*fixture, *refServer) {
+	t.Helper()
+	return loadExtended(t, a), startServer(t, a, append(append([]string{}, extendedFlags...), extra...)...)
+}
+
+// TestClientGroups: go-iec104 interrogates the groups of a reference station.
+func TestClientGroups(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx, srv := startExtended(t, a)
+		ctx := context.Background()
+		c := dial(t, srv.addr)
+		ca := fx.Station.CommonAddr
+
+		for _, group := range []int{1, 2, 3, 16} {
+			want := fx.ExpectedGroup(group)
+			if len(want) == 0 {
+				t.Fatalf("fixture extended has no point in group %d", group)
+			}
+			data, err := c.Interrogate(ctx, ca, asdu.QOIGroup(group))
+			if err != nil {
+				t.Fatalf("Interrogate group %d: %v", group, err)
+			}
+			if got := station.Observe(t, data); !station.SameObserved(got, want) {
+				t.Errorf("group %d:\n got  %v\n want %v", group, got, want)
+			}
+			for _, d := range data {
+				if d.Cause != asdu.Cause(20+group) || d.CommonAddr != ca || d.Negative || d.Test {
+					t.Errorf("group %d: unexpected header: %s", group, d)
+				}
+			}
+			qoi := float64(20 + group)
+			srv.waitEvent(t, "interrogation", func(e event) bool {
+				return e["event"] == "interrogation" && e["qoi"] == qoi && e["accepted"] == true
+			})
+		}
+
+		// The station interrogation still has every point but the counter.
+		data, err := c.Interrogate(ctx, ca, asdu.QOIStation)
+		if err != nil {
+			t.Fatalf("Interrogate: %v", err)
+		}
+		if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
+			t.Errorf("interrogation:\n got  %v\n want %v", got, want)
+		}
+
+		data, err = c.Interrogate(ctx, asdu.Broadcast, asdu.QOIGroup(1))
+		if err != nil {
+			t.Fatalf("Interrogate group 1 (broadcast): %v", err)
+		}
+		if got, want := station.Observe(t, data), fx.ExpectedGroup(1); !station.SameObserved(got, want) {
+			t.Errorf("broadcast:\n got  %v\n want %v", got, want)
+		}
+
+		// A group without points, and a station that does not exist.
+		if len(fx.ExpectedGroup(10)) != 0 {
+			t.Fatal("fixture extended has a point in group 10")
+		}
+		_, err = c.Interrogate(ctx, ca, asdu.QOIGroup(10))
+		negative(t, err, asdu.CauseActivationCon)
+		_, err = c.Interrogate(ctx, ca+6, asdu.QOIGroup(1))
+		negative(t, err, asdu.CauseUnknownCommonAddr)
+	}, extendedFeatures...)
+}
+
+// TestClientBitstringQuality: go-iec104 decodes the value and the quality of
+// M_BO_NA_1 from a reference station, flag by flag.
+func TestClientBitstringQuality(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx, srv := startExtended(t, a)
+		ctx := context.Background()
+		c := dial(t, srv.addr)
+		ca := fx.Station.CommonAddr
+
+		var want []station.Observed
+		for _, o := range fx.Expected(false) {
+			if o.Type == "M_BO_NA_1" {
+				want = append(want, o)
+			}
+		}
+		if len(want) != 3 || want[0].Quality != "" || want[1].Quality != "OV IV" || want[2].Quality != "BL SB NT" {
+			t.Fatalf("fixture extended changed: %v", want)
+		}
+		data, err := c.Interrogate(ctx, ca, asdu.QOIStation)
+		if err != nil {
+			t.Fatalf("Interrogate: %v", err)
+		}
+		var got []station.Observed
+		for _, d := range data {
+			if d.Type == asdu.M_BO_NA_1 {
+				got = append(got, station.Observe(t, []*asdu.ASDU{d})...)
+			}
+		}
+		if !station.SameObserved(got, want) {
+			t.Errorf("interrogation:\n got  %v\n want %v", got, want)
+		}
+
+		if a.knownReadBug(t) {
+			t.Log("not reading: a station of this stack closes the connection on a read")
+			return
+		}
+		for _, w := range want {
+			d, err := c.Read(ctx, ca, w.IOA)
+			if err != nil {
+				t.Fatalf("Read %d: %v", w.IOA, err)
+			}
+			if got := station.Observe(t, []*asdu.ASDU{d}); len(got) != 1 || got[0] != w {
+				t.Errorf("read %d: got %v, want %v", w.IOA, got, w)
+			}
+		}
+	}, featBitstringQ)
+}
+
+// sectionsOf splits content into sections of the given size.
+func sectionsOf(content []byte, size int) [][]byte {
+	var out [][]byte
+	for len(content) > size {
+		out = append(out, content[:size])
+		content = content[size:]
+	}
+	return append(out, content)
+}
+
+// TestClientUpload: go-iec104 sends a file to a reference station. The event of
+// the station says what arrived, and it can be fetched again and is in the
+// directory where the station can do that.
+func TestClientUpload(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		fx, srv := startExtended(t, a)
+		ctx := context.Background()
+		c := dial(t, srv.addr)
+		ca := fx.Station.CommonAddr
+		if len(fx.Uploads) == 0 {
+			t.Fatal("fixture extended has no uploads")
+		}
+		up := fx.Uploads[0]
+
+		// A second upload to the same address replaces the first.
+		for _, size := range []int{1000, 5000, up.MaxSize} {
+			content := fileContent(up.IOA, size)
+			if err := c.PutFile(ctx, ca, up.IOA, up.Name, sectionsOf(content, 2048)...); err != nil {
+				t.Fatalf("PutFile of %d octets: %v", size, err)
+			}
+			hash := fileHash(up.IOA, size)
+			srv.waitEvent(t, "file-received", func(e event) bool {
+				return e["event"] == "file-received" && e["ioa"] == float64(up.IOA) && e["name"] == float64(up.Name) &&
+					e["length"] == float64(size) && e["sha256"] == hash && e["success"] == true
+			})
+			if a.has(t, featFileServer) {
+				got, err := c.GetFile(ctx, ca, up.IOA, up.Name)
+				if err != nil {
+					t.Fatalf("GetFile of the file sent: %v", err)
+				}
+				if !bytes.Equal(got, content) {
+					t.Errorf("the file reads back as %d octets that are not the %d sent", len(got), size)
+				}
+			}
+		}
+		if a.has(t, featDirectoryServer) {
+			entries, err := c.ListFiles(ctx, ca, 0)
+			if err != nil {
+				t.Fatalf("ListFiles: %v", err)
+			}
+			last := entries[len(entries)-1]
+			if last.IOA != up.IOA || last.Name != up.Name || int(last.Length) != up.MaxSize ||
+				last.Status != asdu.FileLastOfDirectory {
+				t.Errorf("last entry of the directory: %+v, want the file sent", last)
+			}
+		}
+
+		// Refusals: a place that is not one, another name, too long, a file
+		// that can only be fetched.
+		received := func() int {
+			n := 0
+			for _, e := range srv.events(t) {
+				if e["event"] == "file-received" {
+					n++
+				}
+			}
+			return n
+		}
+		before := received()
+		for _, r := range []struct {
+			name string
+			ioa  asdu.IOA
+			nof  uint16
+			size int
+		}{
+			{"unknown address", 39999, up.Name, 1000},
+			{"wrong name", up.IOA, up.Name + 8, 1000},
+			{"too large", up.IOA, up.Name, up.MaxSize + 1},
+			{"read-only file", fx.Files[0].IOA, fx.Files[0].Name, 1000},
+		} {
+			err := c.PutFile(ctx, ca, r.ioa, r.nof, sectionsOf(fileContent(r.ioa, r.size), 2048)...)
+			t.Run(r.name, func(t *testing.T) { negative(t, err, asdu.CauseUnknownIOA) })
+		}
+		if got := received(); got != before {
+			t.Errorf("%d file-received events after the refusals, want %d", got, before)
+		}
+
+		// The connection is as usable as before.
+		if _, err := c.Interrogate(ctx, ca, asdu.QOIStation); err != nil {
+			t.Errorf("Interrogate after the transfers: %v", err)
+		}
+	}, append([]string{featUploadServer}, extendedFeatures...)...)
+}
+
+// TestClientDirectory: go-iec104 lists the files of a reference station.
+func TestClientDirectory(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		for _, tt := range []struct {
+			name  string
+			fx    func() *fixture
+			flags []string
+			needs []string
+		}{
+			{"baseline", func() *fixture { return loadFixture(t, a) }, nil, nil},
+			{"extended", func() *fixture { return loadExtended(t, a) }, extendedFlags, extendedFeatures},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				a.need(t, tt.needs...)
+				fx := tt.fx()
+				srv := startServer(t, a, tt.flags...)
+				c := dial(t, srv.addr)
+				entries, err := c.ListFiles(context.Background(), fx.Station.CommonAddr, 0)
+				if err != nil {
+					t.Fatalf("ListFiles: %v", err)
+				}
+				if len(entries) != len(fx.Files) {
+					t.Fatalf("%d entries, want %d: %+v", len(entries), len(fx.Files), entries)
+				}
+				for i, f := range fx.Files {
+					e := entries[i]
+					var status uint8
+					if i == len(fx.Files)-1 {
+						status = asdu.FileLastOfDirectory
+					}
+					if e.IOA != f.IOA || e.Name != f.Name || int(e.Length) != f.Size || e.Status != status {
+						t.Errorf("entry %d: %+v, want file %d, name %d, %d octets, status %#x",
+							i, e, f.IOA, f.Name, f.Size, status)
+					}
+				}
+			})
+		}
+	}, featDirectoryServer)
+}
+
+// settle is how long a test watches a connection on which nothing may arrive.
+const settle = 500 * time.Millisecond
+
+// redundancyEvent checks the event a redundancy group queued: the single point
+// with the lowest address, with the value it had, without time tag.
+func redundancyEvent(t *testing.T, fx *fixture, ev *asdu.ASDU, value bool) {
+	t.Helper()
+	sp, ok := ev.First().(asdu.SinglePoint)
+	if !ok || ev.Type != asdu.M_SP_NA_1 || len(ev.Objects) != 1 || ev.Originator != 0 || ev.CommonAddr != fx.Station.CommonAddr {
+		t.Fatalf("queued event: %s", ev)
+	}
+	if want := fx.Expected(false)[0]; sp.IOA != want.IOA || sp.Value != value || sp.Quality != 0 {
+		t.Errorf("queued event: %+v, want point %d = %v, quality good", sp, want.IOA, value)
+	}
+}
+
+// TestClientRedundancy: two go-iec104 clients against a reference station in a
+// redundancy group, switching over with STOPDT and by taking over. What happens
+// to the connection taken over is left to the stack, closed or open: the test
+// holds only that nothing arrives on it.
+func TestClientRedundancy(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		ctx := context.Background()
+		t.Run("stopdt", func(t *testing.T) {
+			fx, srv := startExtended(t, a, "--redundancy-group")
+			srv.waitEvent(t, "ready", func(e event) bool { return e["event"] == "ready" && e["redundancyGroup"] == true })
+			ca := fx.Station.CommonAddr
+			first, second := &recorder{}, &recorder{}
+			primary := dial(t, srv.addr, client.WithHandler(first))
+			standby := dial(t, srv.addr, client.WithHandler(second), client.WithAutoStart(false))
+
+			data, err := primary.Interrogate(ctx, ca, asdu.QOIStation)
+			if err != nil {
+				t.Fatalf("Interrogate on the primary: %v", err)
+			}
+			if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
+				t.Errorf("primary:\n got  %v\n want %v", got, want)
+			}
+			// The event carries the state of the station.
+			if err := primary.Command(ctx, ca, asdu.SingleCommand{IOA: 500, Value: false}); err != nil {
+				t.Fatalf("Command: %v", err)
+			}
+			if err := primary.StopDT(ctx); err != nil {
+				t.Fatalf("StopDT: %v", err)
+			}
+			seen := first.count(anyASDU)
+			if n := second.count(anyASDU); n != 0 {
+				t.Errorf("%d ASDUs on the standby before its STARTDT", n)
+			}
+
+			if err := standby.StartDT(ctx); err != nil {
+				t.Fatalf("StartDT: %v", err)
+			}
+			redundancyEvent(t, fx, second.find(t, "the queued event", spontaneous), false)
+			data, err = standby.Interrogate(ctx, ca, asdu.QOIStation)
+			if err != nil {
+				t.Fatalf("Interrogate on the standby: %v", err)
+			}
+			want := fx.Expected(false)
+			want[0].Value = false
+			if got := station.Observe(t, data); !station.SameObserved(got, want) {
+				t.Errorf("standby:\n got  %v\n want %v", got, want)
+			}
+			time.Sleep(settle)
+			if n := second.count(spontaneous); n != 1 {
+				t.Errorf("%d events on the standby, want 1", n)
+			}
+			if n := first.count(anyASDU); n != seen {
+				t.Errorf("%d ASDUs on the primary after its STOPDT", n-seen)
+			}
+			// A connection in STOPDT stays up, whatever the other one does.
+			if st := primary.State(); st != iec104.StateStopped {
+				t.Errorf("the primary is %v, want it up and stopped", st)
+			}
+		})
+		t.Run("takeover", func(t *testing.T) {
+			fx, srv := startExtended(t, a, "--redundancy-group")
+			ca := fx.Station.CommonAddr
+			first, second, third := &recorder{}, &recorder{}, &recorder{}
+			primary := dial(t, srv.addr, client.WithHandler(first))
+			standby := dial(t, srv.addr, client.WithHandler(second), client.WithAutoStart(false))
+			if _, err := primary.Interrogate(ctx, ca, asdu.QOIStation); err != nil {
+				t.Fatalf("Interrogate on the primary: %v", err)
+			}
+			seen := first.count(anyASDU)
+
+			if err := standby.StartDT(ctx); err != nil {
+				t.Fatalf("StartDT: %v", err)
+			}
+			data, err := standby.Interrogate(ctx, ca, asdu.QOIStation)
+			if err != nil {
+				t.Fatalf("Interrogate on the standby: %v", err)
+			}
+			if got, want := station.Observe(t, data), fx.Expected(false); !station.SameObserved(got, want) {
+				t.Errorf("standby:\n got  %v\n want %v", got, want)
+			}
+			time.Sleep(settle)
+			if n := second.count(spontaneous); n != 0 {
+				t.Errorf("%d events on the standby: a takeover queues nothing", n)
+			}
+
+			// Asking on the old connection gets no answer, by whatever means.
+			short, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			if _, err := primary.Interrogate(short, ca, asdu.QOIStation); err == nil {
+				t.Error("an interrogation on the connection taken over was answered")
+			}
+
+			// The queue does not go back to it: the event of this STOPDT goes
+			// to the next connection that starts.
+			if err := standby.StopDT(ctx); err != nil {
+				t.Fatalf("StopDT: %v", err)
+			}
+			time.Sleep(settle)
+			if n := first.count(anyASDU); n != seen {
+				t.Errorf("%d ASDUs on the connection taken over", n-seen)
+			}
+			next := dial(t, srv.addr, client.WithHandler(third), client.WithAutoStart(false))
+			if err := next.StartDT(ctx); err != nil {
+				t.Fatalf("StartDT on a third connection: %v", err)
+			}
+			redundancyEvent(t, fx, third.find(t, "the queued event", spontaneous), true)
+		})
+		t.Run("no group", func(t *testing.T) {
+			// Without the flag every connection is on its own: no queue, and
+			// both can be started.
+			fx, srv := startExtended(t, a)
+			ca := fx.Station.CommonAddr
+			rec := &recorder{}
+			primary := dial(t, srv.addr)
+			other := dial(t, srv.addr, client.WithHandler(rec), client.WithAutoStart(false))
+			if err := primary.StopDT(ctx); err != nil {
+				t.Fatalf("StopDT: %v", err)
+			}
+			if err := other.StartDT(ctx); err != nil {
+				t.Fatalf("StartDT: %v", err)
+			}
+			time.Sleep(settle)
+			if n := rec.count(anyASDU); n != 0 {
+				t.Errorf("%d ASDUs without a group", n)
+			}
+			if err := primary.StartDT(ctx); err != nil {
+				t.Fatalf("StartDT again: %v", err)
+			}
+			for _, c := range []*client.Client{primary, other} {
+				if _, err := c.Interrogate(ctx, ca, asdu.QOIStation); err != nil {
+					t.Errorf("Interrogate: %v", err)
+				}
+			}
+		})
+	}, append([]string{featRedundServer}, extendedFeatures...)...)
 }

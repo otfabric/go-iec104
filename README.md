@@ -527,7 +527,7 @@ cloned or built here. Scenarios, expected values and assertions live in this
 repository.
 
 This version is qualified against
-[iec104-interop v0.3.1](https://github.com/otfabric/iec104-interop/releases/tag/v0.3.1)
+[iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0)
 (lib60870-C v2.4.1, j60870 1.8.0, wendy512/iec104 v1.0.4 on go-iecp5
 v1.2.6, cB-Sigma/iec60870 v0.3.0). The four images are pinned by digest in
 `interop/harness.go`, the Makefile and the Interop workflow, which runs on
@@ -578,10 +578,10 @@ image lacks:
   implementation or certified test equipment has checked either. No
   broadcast key, no IEC 62351-8 tokens, no secp256k1, X448 or brainpool.
   See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
-- **File transfer** covers download, upload and the directory. Upload and
-  the directory are verified by this repository's own tests only: no
-  reference stack offers them through the interop images yet. File deletion
-  and the query log have their types in the codec but no procedure.
+- **File transfer** covers download, upload and the directory, tested
+  against the pinned references of iec104-interop v0.5.0
+  ([details](INTEROPERABILITY.md#verification-status)). File deletion and the
+  query log have their types in the codec but no procedure.
 - **The event queue is in memory.** It survives a control centre that is
   away, not a restart of the station.
 - **Verified against four third-party stacks**, lib60870-C, j60870,

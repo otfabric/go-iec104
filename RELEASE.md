@@ -1,5 +1,20 @@
 # go-iec104 Releases
 
+## v0.1.2
+
+**Date:** 2026-11-02
+**Previous release:** v0.1.1
+
+### Fixed
+
+- A takeover in a group named with `WithRedundancyGroups` left the old connection started. A STARTDT on another connection only moved the event queue: `Session.Started` was true on both, a request on the old connection was still answered, and when the new one stopped the queue went back to the old one. The old connection is now closed before the STARTDT con goes out; one in STOPDT stays up. The `default` group, used without that option, is not a redundancy group and keeps its independent sessions.
+
+### Tests
+
+- The `interop` suite tests client and server against what iec104-interop's container contract 1.3 adds: interrogation groups, a quality on bitstrings, mutual TLS, file upload, the file directory and redundancy. The references are pinned to iec104-interop v0.5.0, where they run in both directions for every reference that declares the feature: 14 tests, 198 cases, 3 skipped because wendy512 has no upload, redundancy or TLS station.
+
+---
+
 ## v0.1.1
 
 **Date:** 2026-10-31

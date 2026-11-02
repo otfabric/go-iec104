@@ -284,6 +284,83 @@ func TestAdmission(t *testing.T) {
 	})
 }
 
+// The station of the interop suite, with what a fixture of container contract
+// 1.3 of iec104-interop asks of it.
+func TestStationExtendedFixture(t *testing.T) {
+	fx, err := station.Parse([]byte(`{"station": {"commonAddress": 1},
+		"points": [
+			{"ioa": 100, "type": "M_SP_NA_1", "value": true, "groups": [1]},
+			{"ioa": 104, "type": "M_BO_NA_1", "value": 1431655765, "quality": ["OV", "IV"], "groups": [1, 2]},
+			{"ioa": 300, "type": "M_IT_NA_1", "value": 7}],
+		"commands": [{"ioa": 500, "type": "C_SC_NA_1", "target": 100}],
+		"files": [{"ioa": 30000, "name": 1, "size": 10, "sectionSize": 10}],
+		"uploads": [{"ioa": 31000, "name": 1, "maxSize": 20}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	st := station.Start(t, fx)
+	c := connect(t, st.Loopback())
+	for group := 1; group <= 2; group++ {
+		data, err := c.Interrogate(ctx, 1, asdu.QOIGroup(group))
+		if err != nil {
+			t.Fatalf("group %d: %v", group, err)
+		}
+		if got, want := station.Observe(t, data), fx.ExpectedGroup(group); !station.SameObserved(got, want) || len(want) == 0 {
+			t.Errorf("group %d: got %v, want %v", group, got, want)
+		}
+	}
+	if _, err := c.Interrogate(ctx, 1, asdu.QOIGroup(3)); !errors.As(err, new(*iec104.NegativeError)) {
+		t.Errorf("a group without points: %v", err)
+	}
+
+	// Only what the uploads of the fixture take.
+	if err := c.PutFile(ctx, 1, 31000, 1, make([]byte, 20)); err != nil {
+		t.Errorf("PutFile: %v", err)
+	}
+	if got, ok := st.Uploaded(31000); !ok || len(got) != 20 {
+		t.Errorf("Uploaded: %d octets, %v", len(got), ok)
+	}
+	for _, r := range []struct {
+		ioa  asdu.IOA
+		name uint16
+		size int
+	}{{31000, 2, 10}, {31000, 1, 21}, {30000, 1, 10}, {40000, 1, 10}} {
+		if err := c.PutFile(ctx, 1, r.ioa, r.name, make([]byte, r.size)); !errors.As(err, new(*iec104.NegativeError)) {
+			t.Errorf("PutFile %+v: %v", r, err)
+		}
+	}
+
+	// A redundancy group: STOPDT queues the point as it is then, a takeover nothing.
+	grp := station.StartGroup(t, fx)
+	first := connect(t, grp.Loopback())
+	if err := first.Command(ctx, 1, asdu.SingleCommand{IOA: 500, Value: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.StopDT(ctx); err != nil {
+		t.Fatal(err)
+	}
+	testutil.Eventually(t, "the queued event", func() bool { return grp.Server.Pending(station.GroupName) == 1 })
+	got := make(chan *asdu.ASDU, 4)
+	second := connect(t, grp.Loopback(), client.WithParams(apci.Params{W: 1}),
+		client.WithHandler(client.HandlerFunc(func(a *asdu.ASDU) { got <- a })))
+	select {
+	case a := <-got:
+		sp, ok := a.First().(asdu.SinglePoint)
+		if !ok || a.Type != asdu.M_SP_NA_1 || a.Cause != asdu.CauseSpontaneous || sp.IOA != 100 || sp.Value {
+			t.Errorf("queued event: %s", a)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no queued event")
+	}
+	testutil.Eventually(t, "the acknowledgement", func() bool { return grp.Server.Pending(station.GroupName) == 0 })
+	connect(t, grp.Loopback())
+	testutil.Eventually(t, "the takeover", func() bool { return second.State() == iec104.StateDisconnected })
+	if p := grp.Server.Pending(station.GroupName); p != 0 {
+		t.Errorf("Pending = %d after a takeover, want 0", p)
+	}
+}
+
 // A full event queue drops its oldest events and says so.
 func TestEventQueueOverflow(t *testing.T) {
 	l := start(t, []server.Option{server.WithEventQueue(10)})
