@@ -19,11 +19,10 @@
 //     (client_test.go, server_test.go), and mutual TLS with certificates made
 //     when the test runs (secure_test.go)
 //
-// A test of contract 1.3 asks the image under test. The default pins predate that
-// contract and declare none of it, so these tests skip there, without failing
-// under IEC104_REQUIRE_INTEROP; they run against images given with
-// IEC104_INTEROP_*_IMAGE, and with the default pins once those follow a release
-// of iec104-interop.
+// A test of contract 1.3 asks the image under test and skips a reference that
+// does not declare the feature, without failing under IEC104_REQUIRE_INTEROP:
+// an older image declares none of it, and wendy512 has no TLS station, no
+// upload station and no redundancy station.
 //
 // The images are the only thing shared with iec104-interop: their container
 // contract (commands, JSON documents, exit codes) and the fixture baked into

@@ -362,12 +362,9 @@ tell, ASDU by ASDU, from those of the lib60870-C file server.
 
 Container contract 1.3 of iec104-interop adds interrogation groups, a quality
 on `M_BO_NA_1`, mutual TLS (IEC 62351-3), file upload, the file directory and
-redundancy groups (IEC 60870-5-104 clause 10). The images pinned above predate
-it and declare none of that, so the suite skips these tests there, and until the
-pins follow a release of iec104-interop this repository's own tests (client
-against server, and each against a scripted peer) are the evidence for them on
-every push. The suite reads the capabilities from the image under test; given
-candidate images with `IEC104_INTEROP_*_IMAGE`, it runs in both directions:
+redundancy groups (IEC 60870-5-104 clause 10). The images pinned above
+(v0.5.0) offer it wherever their upstream supports it. The suite reads the
+capabilities from the image under test and runs in both directions:
 
 | Feature | go-iec104 client → reference server | reference client → go-iec104 server |
 |---------|-------------------------------------|-------------------------------------|

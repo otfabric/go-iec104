@@ -11,7 +11,7 @@
 
 ### Tests
 
-- The `interop` suite tests client and server against what iec104-interop's container contract 1.3 adds: interrogation groups, a quality on bitstrings, mutual TLS, file upload, the file directory and redundancy. Those tests ask the image under test, so they skip on the images pinned now; the pins follow the release of iec104-interop.
+- The `interop` suite tests client and server against what iec104-interop's container contract 1.3 adds: interrogation groups, a quality on bitstrings, mutual TLS, file upload, the file directory and redundancy. The references are pinned to iec104-interop v0.5.0, where they run in both directions for every reference that declares the feature: 14 tests, 198 cases, 3 skipped because wendy512 has no upload, redundancy or TLS station.
 
 ---
 
