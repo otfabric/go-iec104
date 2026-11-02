@@ -6,18 +6,26 @@ package interop
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	iec104 "github.com/otfabric/go-iec104"
 	"github.com/otfabric/go-iec104/apci"
 	"github.com/otfabric/go-iec104/asdu"
 	"github.com/otfabric/go-iec104/client"
@@ -319,4 +327,199 @@ func TestSecureServer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// transport is the key material of the TLS tests, made when the test runs and
+// written to a directory the reference containers mount at /secrets: what
+// make_identities of iec104-interop makes, on secp256r1, the keys in PKCS #8.
+type transport struct {
+	dir                   string
+	authority, otherCA    *x509.CertPool
+	station, scada, rogue tls.Certificate
+}
+
+func newTransport(t testing.TB) *transport {
+	t.Helper()
+	dir := t.TempDir()
+	// The containers run as uid 10001.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	issue := func(name string, template, parent *x509.Certificate, signer *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey, tls.Certificate) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+		if err != nil {
+			t.Fatal(err)
+		}
+		template.SerialNumber = serial
+		template.Subject = pkix.Name{CommonName: name}
+		template.NotBefore, template.NotAfter = now.Add(-time.Hour), now.Add(48*time.Hour)
+		template.BasicConstraintsValid = true
+		if parent == nil {
+			parent, signer = template, key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+		for file, data := range map[string][]byte{name + ".pem": certPEM, name + ".key": keyPEM} {
+			if err := os.WriteFile(filepath.Join(dir, file), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pair, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert, key, pair
+	}
+	authority := func() *x509.Certificate {
+		return &x509.Certificate{IsCA: true, KeyUsage: x509.KeyUsageCertSign}
+	}
+	leaf := func(hosts ...string) *x509.Certificate {
+		return &x509.Certificate{DNSNames: hosts, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyAgreement}
+	}
+	ca, caKey, _ := issue("ca", authority(), nil, nil)
+	other, _, _ := issue("other-ca", authority(), nil, nil)
+	tr := &transport{dir: dir, authority: x509.NewCertPool(), otherCA: x509.NewCertPool()}
+	tr.authority.AddCert(ca)
+	tr.otherCA.AddCert(other)
+	_, _, tr.station = issue("station", leaf(tlsStationName), ca, caKey)
+	_, _, tr.scada = issue("scada", leaf(), ca, caKey)
+	_, _, tr.rogue = issue("rogue", leaf(), nil, nil)
+	return tr
+}
+
+// tlsStationName is what the go-iec104 client checks in the certificate of a
+// station. The address is of no use for that: the contract does not check one.
+const tlsStationName = "station"
+
+func (tr *transport) mount() []string { return []string{"-v", tr.dir + ":/secrets:ro"} }
+
+// tlsFlags are the transport security flags of a reference.
+func tlsFlags(name, trust string) []string {
+	return []string{"--tls", "--tls-cert", "/secrets/" + name + ".pem", "--tls-key", "/secrets/" + name + ".key",
+		"--tls-trust", "/secrets/" + trust + ".pem"}
+}
+
+func tlsClientConfig(id tls.Certificate, trust *x509.CertPool) *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{id}, RootCAs: trust, ServerName: tlsStationName}
+}
+
+// TestTLSClient: the go-iec104 client, with client.WithTLS, against the reference
+// stations with --tls, and that neither side gives in to the wrong certificate.
+func TestTLSClient(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		tr := newTransport(t)
+		fx := loadExtended(t, a)
+		ca := fx.Station.CommonAddr
+		srv := startServerWith(t, a, tr.mount(), append(append([]string{}, extendedFlags...), tlsFlags("station", "ca")...)...)
+		srv.waitEvent(t, "tls ready", func(e event) bool { return e["event"] == "ready" && e["tls"] == true })
+		ctx := context.Background()
+
+		c := dial(t, srv.addr, client.WithTLS(tlsClientConfig(tr.scada, tr.authority)))
+		totals, err := c.CounterInterrogate(ctx, ca, asdu.CounterGeneral, asdu.FreezeRead)
+		if err != nil {
+			t.Fatalf("CounterInterrogate: %v", err)
+		}
+		if got, want := station.Observe(t, totals), fx.Expected(true); !station.SameObserved(got, want) {
+			t.Errorf("counter interrogation:\n got  %v\n want %v", got, want)
+		}
+		data, err := c.Interrogate(ctx, ca, asdu.QOIGroup(2))
+		if err != nil {
+			t.Fatalf("Interrogate group 2: %v", err)
+		}
+		if got, want := station.Observe(t, data), fx.ExpectedGroup(2); !station.SameObserved(got, want) {
+			t.Errorf("group 2:\n got  %v\n want %v", got, want)
+		}
+		if err := c.Command(ctx, ca, asdu.SingleCommand{IOA: 500, Value: false}); err != nil {
+			t.Errorf("Command: %v", err)
+		}
+		_ = c.Close()
+
+		// Each of these must fail: a stack that ignored the trust, or TLS
+		// altogether, would pass the part above and not this.
+		refused := func(what string, addr string, opts ...client.Option) {
+			t.Helper()
+			short, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if c, err := client.Dial(short, addr, opts...); err == nil {
+				_ = c.Close()
+				t.Errorf("%s: connected", what)
+			}
+		}
+		refused("a controlling station nobody trusts", srv.addr, client.WithTLS(tlsClientConfig(tr.rogue, tr.authority)))
+		refused("a station of another authority", srv.addr, client.WithTLS(tlsClientConfig(tr.scada, tr.otherCA)))
+		refused("a client without TLS", srv.addr)
+		plain := startServer(t, a, extendedFlags...)
+		refused("a station without TLS", plain.addr, client.WithTLS(tlsClientConfig(tr.scada, tr.authority)))
+
+		// The station survived all that.
+		c = dial(t, srv.addr, client.WithTLS(tlsClientConfig(tr.scada, tr.authority)))
+		if _, err := c.CounterInterrogate(ctx, ca, asdu.CounterGeneral, asdu.FreezeRead); err != nil {
+			t.Errorf("CounterInterrogate after the refusals: %v", err)
+		}
+	}, append([]string{featTLSServer}, extendedFeatures...)...)
+}
+
+// TestTLSServer: the reference clients with --tls against a go-iec104 station with
+// server.WithTLS.
+func TestTLSServer(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, a adapter) {
+		tr := newTransport(t)
+		fx := loadExtended(t, a)
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{tr.station},
+			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: tr.authority}
+		var started atomic.Int64
+		follow := server.WithStateHandler(func(_ *server.Session, state iec104.State, _ error) {
+			if state == iec104.StateStarted {
+				started.Add(1)
+			}
+		})
+		good := strings.Join(tlsFlags("scada", "ca"), " ")
+
+		t.Run("mutual", func(t *testing.T) {
+			runCases(t, a, station.StartTLS(t, fx, cfg), []featureCase{
+				{"counter-interrogate " + good, "exit=0 ok=true error=- conf=7 term=true asdus=C_CI_NA_1/7,M_IT_NA_1/37,C_CI_NA_1/10 tls=true"},
+				{"interrogate --qoi 21 " + good, "exit=0 ok=true error=- conf=7 term=true asdus=C_IC_NA_1/7,M_SP_NA_1/21,M_DP_NA_1/21,C_IC_NA_1/10 tls=true"},
+				{"command --type C_SC_NA_1 --ioa 500 --value false " + good, "exit=0 ok=true error=- conf=7 term=true asdus=C_SC_NA_1/7,M_SP_TB_1/11,C_SC_NA_1/10 tls=true"},
+			}, tr.mount()...)
+		})
+
+		// Each of these must fail, and the station must have started nothing.
+		const refused = "exit=1 ok=false error=tls-failed conf= term=false asdus= tls=false"
+		st := station.StartTLS(t, fx, cfg, follow)
+		runCases(t, a, st, []featureCase{
+			{"counter-interrogate --timeout-ms 3000 " + strings.Join(tlsFlags("rogue", "ca"), " "), refused},
+			{"counter-interrogate --timeout-ms 3000 " + strings.Join(tlsFlags("scada", "other-ca"), " "), refused},
+		}, tr.mount()...)
+		t.Run("client without TLS", func(t *testing.T) {
+			r := runClient(t, a, st.Addr, "counter-interrogate", "--timeout-ms", "3000")
+			if r.exit == 0 || r.OK || r.StartDT || len(r.ASDUs) != 0 {
+				t.Errorf("a client without TLS got through: %s", r.summary())
+			}
+		})
+		if n := started.Load(); n != 0 {
+			t.Errorf("%d connections started data transfer", n)
+		}
+		t.Run("station without TLS", func(t *testing.T) {
+			runCases(t, a, station.Start(t, fx), []featureCase{
+				{"counter-interrogate --timeout-ms 3000 " + good, refused},
+			}, tr.mount()...)
+		})
+	}, featTLSClient, featGroups, featBitstringQ)
 }

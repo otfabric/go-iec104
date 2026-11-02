@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"testing"
 
@@ -23,6 +24,14 @@ type Fixture struct {
 	Points   []Point   `json:"points"`
 	Commands []Command `json:"commands"`
 	Files    []File    `json:"files"`
+	Uploads  []Upload  `json:"uploads"`
+}
+
+// Upload is a place a controlling station may send a file to.
+type Upload struct {
+	IOA     asdu.IOA `json:"ioa"`
+	Name    uint16   `json:"name"`
+	MaxSize int      `json:"maxSize"`
 }
 
 // File is a file the station offers. Its content is not stored:
@@ -50,6 +59,12 @@ type Point struct {
 	Transient bool     `json:"transient"`
 	Sequence  uint8    `json:"sequence"`
 	Quality   []string `json:"quality"`
+	Groups    []int    `json:"groups"` // interrogation groups, 1..16
+}
+
+// InGroup reports whether the point belongs to the interrogation group.
+func (p Point) InGroup(group int) bool {
+	return slices.Contains(p.Groups, group)
 }
 
 type Command struct {
@@ -105,6 +120,18 @@ func (fx *Fixture) Expected(counters bool) []Observed {
 			continue
 		}
 		out = append(out, Observed{p.IOA, p.Type, p.Value, JoinFlags(p.Quality)})
+	}
+	return out
+}
+
+// ExpectedGroup returns what the station reports for an interrogation of the
+// group, in address order.
+func (fx *Fixture) ExpectedGroup(group int) []Observed {
+	var out []Observed
+	for _, p := range fx.Points {
+		if p.InGroup(group) {
+			out = append(out, Observed{p.IOA, p.Type, p.Value, JoinFlags(p.Quality)})
+		}
 	}
 	return out
 }

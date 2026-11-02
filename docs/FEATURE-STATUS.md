@@ -65,7 +65,7 @@ HMAC-SHA3-256 is present only when built with Go 1.24 or later (`sec/algorithms_
 |---|---|---|---|
 | Download, `Client.GetFile` | ✅ | `TestFileTransfer` | lib60870-C, cB-Sigma |
 | Download, `server.FileServer` | ✅ | `TestFileTransfer` | lib60870-C, j60870, cB-Sigma |
-| Upload, directory | ✅ | `TestFileUploadAndDirectory` | none: no pinned image offers them |
+| Upload, directory | ✅ | `TestFileUploadAndDirectory` | none yet: the tests are in `interop` and skip on the pinned images, which do not offer them; the pins follow iec104-interop |
 | File deletion, query log | ⚙ | none | none |
 
 ### Redundancy and events
@@ -101,8 +101,8 @@ Peer versions, digests and per-direction results are in [INTEROPERABILITY.md](..
 ## 5. Not verified
 
 - Certified test equipment, field devices and any conformance test.
-- TLS against any other implementation.
+- TLS, interrogation groups and server redundancy against any other implementation on the pinned images: the `interop` tests skip there until the pins follow iec104-interop.
 - `t1` and `t2` behaviour against another implementation.
-- File upload and the directory against another implementation.
+- File upload and the directory against another implementation on the pinned images, likewise.
 - IEC 62351-5 against anything other than cB-Sigma/iec60870.
 - Any platform other than Linux amd64, in CI.

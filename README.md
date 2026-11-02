@@ -578,10 +578,12 @@ image lacks:
   implementation or certified test equipment has checked either. No
   broadcast key, no IEC 62351-8 tokens, no secp256k1, X448 or brainpool.
   See [SECURITY.md](SECURITY.md#application-layer-security-iec-62351-5).
-- **File transfer** covers download, upload and the directory. Upload and
-  the directory are verified by this repository's own tests only: no
-  reference stack offers them through the interop images yet. File deletion
-  and the query log have their types in the codec but no procedure.
+- **File transfer** covers download, upload and the directory. The interop
+  tests of upload and the directory skip on the pinned images, which do not
+  offer them; those pins follow the next release of iec104-interop, so until
+  then this repository's own tests are the evidence
+  ([details](INTEROPERABILITY.md#verification-status)). File deletion and the
+  query log have their types in the codec but no procedure.
 - **The event queue is in memory.** It survives a control centre that is
   away, not a restart of the station.
 - **Verified against four third-party stacks**, lib60870-C, j60870,

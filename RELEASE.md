@@ -9,6 +9,10 @@
 
 - A takeover in a group named with `WithRedundancyGroups` left the old connection started. A STARTDT on another connection only moved the event queue: `Session.Started` was true on both, a request on the old connection was still answered, and when the new one stopped the queue went back to the old one. The old connection is now closed before the STARTDT con goes out; one in STOPDT stays up. The `default` group, used without that option, is not a redundancy group and keeps its independent sessions.
 
+### Tests
+
+- The `interop` suite tests client and server against what iec104-interop's container contract 1.3 adds: interrogation groups, a quality on bitstrings, mutual TLS, file upload, the file directory and redundancy. Those tests ask the image under test, so they skip on the images pinned now; the pins follow the release of iec104-interop.
+
 ---
 
 ## v0.1.1

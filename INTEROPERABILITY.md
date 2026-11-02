@@ -360,10 +360,26 @@ lib60870-C station with the content its fixture defines, and the lib60870-C
 and j60870 clients download from `FileServer`, whose answers they cannot
 tell, ASDU by ASDU, from those of the lib60870-C file server.
 
-File upload and the directory are verified by this repository's own tests
-only (client against server, and each against a scripted peer). The pinned
-reference images have no operation for them: lib60870-C can receive a file
-but has no directory, and the other two stacks have neither.
+Container contract 1.3 of iec104-interop adds interrogation groups, a quality
+on `M_BO_NA_1`, mutual TLS (IEC 62351-3), file upload, the file directory and
+redundancy groups (IEC 60870-5-104 clause 10). The images pinned above predate
+it and declare none of that, so the suite skips these tests there, and until the
+pins follow a release of iec104-interop this repository's own tests (client
+against server, and each against a scripted peer) are the evidence for them on
+every push. The suite reads the capabilities from the image under test; given
+candidate images with `IEC104_INTEROP_*_IMAGE`, it runs in both directions:
+
+| Feature | go-iec104 client → reference server | reference client → go-iec104 server |
+|---------|-------------------------------------|-------------------------------------|
+| Interrogation groups | `TestClientGroups`: lib60870-C, j60870, wendy512, cB-Sigma | `TestServerGroups`: all four |
+| Quality on `M_BO_NA_1` | `TestClientBitstringQuality`: all four (j60870 without read) | `TestServerBitstringQuality`: all four |
+| Mutual TLS, with certificates made when the test runs, and the wrong authority, no TLS on either side refused | `TestTLSClient`: lib60870-C, j60870, cB-Sigma | `TestTLSServer`: all four |
+| File upload, read back, refusals | `TestClientUpload`: lib60870-C, j60870, cB-Sigma | `TestServerUpload`: all four |
+| File directory | `TestClientDirectory`: all four | `TestServerDirectory`: all four |
+| Redundancy: STOPDT, takeover, queued event | `TestClientRedundancy`: lib60870-C, j60870, cB-Sigma | `TestServerRedundancy`: all four |
+
+wendy512 on go-iecp5 has no station over TLS, cannot receive a file and cannot
+follow a group of connections; its image says so and the tests skip.
 
 It has **not** been run against certified test equipment or field devices.
 Interoperability reports are welcome.
