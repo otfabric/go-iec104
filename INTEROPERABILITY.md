@@ -222,8 +222,10 @@ registered for the type and provides `Confirm`, `Negative`, `Terminate` and
 
 ## Redundancy
 
-The standard lets a controlled station serve several connections of one
-redundancy group, of which exactly one is started.
+IEC 60870-5-104 edition 2, clause 10 ("Redundant connections"), lets a
+controlled station serve several connections of one redundancy group, of
+which exactly one is started. Closing the connection that is taken over, below,
+is how go-iec104 keeps it at one; it is not taken from the text of clause 10.
 
 - **Server**: `WithRedundancyGroups` assigns each connection to a group by
   the client's address. Each connection has its own STARTDT/STOPDT state; the
@@ -239,7 +241,11 @@ redundancy group, of which exactly one is started.
 - **Client**: `client.Group` manages a redundancy group: every connection
   established, exactly one started, the standbys supervised by test frames,
   automatic failover when the active one is lost and manual `Switchover`.
-  A single `Client` with `WithAutoStart(false)` is the building block.
+  A single `Client` with `WithAutoStart(false)` is the building block. A
+  standby that loses its connection comes back in STOPDT, so it does not take
+  over from the active one (`TestReconnectingStandbyDoesNotEvictActive`,
+  `TestFailoverThenRejoinDoesNotEvict`). A plain `Client` that reconnects with
+  auto-start sends STARTDT and takes over again, in a declared server group.
 
 ## Application-layer security
 
@@ -362,7 +368,7 @@ tell, ASDU by ASDU, from those of the lib60870-C file server.
 
 Container contract 1.3 of iec104-interop adds interrogation groups, a quality
 on `M_BO_NA_1`, mutual TLS (IEC 62351-3), file upload, the file directory and
-redundancy groups (IEC 60870-5-104 clause 10). The images pinned above
+redundancy groups (IEC 60870-5-104 edition 2, clause 10). The images pinned above
 (v0.5.0) offer it wherever their upstream supports it. The suite reads the
 capabilities from the image under test and runs in both directions:
 
