@@ -219,7 +219,11 @@ func (f *FileServer) HandleASDU(s *Session, a *asdu.ASDU) {
 		err = s.Reject(a, asdu.CauseUnknownType)
 	}
 	if err != nil {
-		key := fileKey{s, a.CommonAddr, a.First().Address()}
+		var ioa asdu.IOA
+		if o := a.First(); o != nil {
+			ioa = o.Address()
+		}
+		key := fileKey{s, a.CommonAddr, ioa}
 		s.log.Warn("file transfer stopped", "ca", a.CommonAddr, "ioa", uint32(key.ioa), "error", err)
 		if t := f.take(key); t != nil {
 			f.done(key, t, err)
@@ -355,7 +359,9 @@ func (f *FileServer) receive(s *Session, a *asdu.ASDU) error {
 			return refuse()
 		}
 		u.open, u.nos, u.want = true, o.Section, int(o.Length)
-		u.sections = append(u.sections, make([]byte, 0, o.Length))
+		// The length is the peer's claim: memory grows with the data that
+		// arrives, from at most 64 KiB reserved.
+		u.sections = append(u.sections, make([]byte, 0, min(o.Length, 64<<10)))
 		return f.send(s, a.CommonAddr, asdu.FileCall{IOA: o.IOA, Name: o.Name, Section: o.Section, Qualifier: asdu.SectionRequest})
 
 	case asdu.FileSegment:

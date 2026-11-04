@@ -370,7 +370,9 @@ var ProcessCommands []asdu.TypeID // types 45..51 and 58..64
 for system commands, process commands and parameters, a cause other than
 activation or deactivation ("unknown cause of transmission"; `C_RD_NA_1`
 requires "request"). File transfer and private types reach their handler
-with any cause. `Handle(nil, t)` removes a registration.
+with any cause. An ASDU without information objects (VSQ of zero) never
+reaches a handler: it is rejected as an unknown type identification.
+`Handle(nil, t)` removes a registration.
 
 ### File server
 
@@ -663,7 +665,7 @@ func (n Normalized) Float64() float64        // [-1, 1)
 func NormalizedFromFloat(f float64) Normalized // clamps
 
 type QOI uint8           // QOIStation, QOIGroup1 … QOIGroup16
-func QOIGroup(n int) QOI
+func QOIGroup(n int) QOI        // n in 1..16; 0 ("not used") otherwise
 func (q QOI) Cause() Cause
 
 type Timestamp struct {
@@ -686,6 +688,7 @@ Time tag rules:
 
 - Times are converted to and from `Params.Location` (UTC by default).
 - CP56Time2a years are two digits: 70..99 → 1970..1999, 0..69 → 2000..2069.
+  A time outside 1970..2069 (in `Params.Location`) is sent flagged invalid.
 - CP24Time2a carries minute, second and millisecond only; it decodes onto
   0001-01-01 00:mm:ss and the receiver supplies hour and date.
 - A zero `Time` under a CP56Time2a type is sent flagged invalid; a received

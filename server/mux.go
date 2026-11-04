@@ -69,6 +69,11 @@ func (m *Mux) HandleASDU(s *Session, a *asdu.ASDU) {
 		_ = s.Reject(a, asdu.CauseUnknownType)
 	case !validCause(a):
 		_ = s.Reject(a, asdu.CauseUnknownCause)
+	case a.First() == nil:
+		// Every type a controlling station sends carries an information
+		// object; one without any (VSQ of zero) is refused like an
+		// unknown type, so no handler has to check for it.
+		_ = s.Reject(a, asdu.CauseUnknownType)
 	default:
 		h.HandleASDU(s, a)
 	}

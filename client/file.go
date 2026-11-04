@@ -182,6 +182,10 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 			}
 			switch v := o.(type) {
 			case asdu.FileSegment:
+				if v.Section != section.Section {
+					return nil, fmt.Errorf("%w: file transfer: segment of section %d, want %d",
+						iec104.ErrProtocol, v.Section, section.Section)
+				}
 				if int64(len(data)+len(v.Data)) > int64(ready.Length) {
 					return nil, fmt.Errorf("%w: file transfer: more data than the announced %d octets",
 						iec104.ErrProtocol, ready.Length)
@@ -191,7 +195,7 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 				if v.Qualifier != asdu.LastSectionNoDeactivation && v.Qualifier != asdu.LastSectionDeactivation {
 					return nil, unexpected(o, "a segment or last segment")
 				}
-				good := v.Checksum == fileChecksum(data[start:]) && int64(len(data)-start) == int64(section.Length)
+				good := v.Section == section.Section && v.Checksum == fileChecksum(data[start:]) && int64(len(data)-start) == int64(section.Length)
 				ack := asdu.FileAck{IOA: ioa, Name: name, Section: section.Section, Qualifier: asdu.AckSectionPositive}
 				if !good {
 					ack.Qualifier = asdu.AckSectionNegative
