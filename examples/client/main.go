@@ -56,7 +56,11 @@ func main() {
 	operate := flag.Uint("operate", 0, "information object address of a single command to switch on (0: none)")
 	debug := flag.Bool("debug", false, "log every APDU")
 	flag.Parse()
-	station := asdu.CommonAddr(*ca)
+	if *ca > 0xFFFF || *operate > 0xFFFFFF {
+		log.Fatalf("common address %d (0..65535) or information object address %d (0..16777215) out of range", *ca, *operate)
+	}
+	station := asdu.CommonAddr(min(*ca, 0xFFFF))
+	operateIOA := asdu.IOA(min(*operate, 0xFFFFFF))
 
 	level := slog.LevelInfo
 	if *debug {
@@ -93,8 +97,8 @@ func main() {
 		log.Printf("clock synchronization: %v", err)
 	}
 
-	if *operate != 0 {
-		cmd := asdu.SingleCommand{IOA: asdu.IOA(*operate), Value: true}
+	if operateIOA != 0 {
+		cmd := asdu.SingleCommand{IOA: operateIOA, Value: true}
 		// Select before operate: both steps must be confirmed.
 		cmd.Select = true
 		err := c.Command(ctx, station, cmd)

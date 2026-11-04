@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -287,11 +288,11 @@ func createX25519Certificate(tmpl, parent *x509.Certificate, pub *ecdh.PublicKey
 // LoadIdentity reads a PEM certificate and its PEM private key (PKCS #8,
 // or SEC 1 for P-256) from files.
 func LoadIdentity(certFile, keyFile string) (*Identity, error) {
-	certPEM, err := os.ReadFile(certFile)
+	certPEM, err := os.ReadFile(filepath.Clean(certFile))
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, err := os.ReadFile(keyFile)
+	keyPEM, err := os.ReadFile(filepath.Clean(keyFile))
 	if err != nil {
 		return nil, err
 	}

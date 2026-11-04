@@ -48,7 +48,7 @@ type File struct {
 func (f File) Content() []byte {
 	b := make([]byte, f.Size)
 	for i := range b {
-		b[i] = byte((i + int(f.IOA)) % 251)
+		b[i] = byte((i + int(f.IOA)) % 251 & 0xFF)
 	}
 	return b
 }
@@ -260,6 +260,9 @@ func Parse(data []byte) (*Fixture, error) {
 	for i := range fx.Commands {
 		if fx.Commands[i].ReportCause == 0 {
 			fx.Commands[i].ReportCause = int(asdu.CauseReturnRemote)
+		}
+		if c := fx.Commands[i].ReportCause; c < 1 || c > 63 {
+			return nil, fmt.Errorf("command %d: report cause %d, want 1..63", i, c)
 		}
 	}
 	return fx, nil

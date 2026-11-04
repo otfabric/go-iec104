@@ -137,7 +137,7 @@ func (a *ASDU) AppendEncode(b []byte, p Params) ([]byte, error) {
 	if p.CauseSize == 2 {
 		b = append(b, a.Originator)
 	}
-	b = append(b, byte(a.CommonAddr))
+	b = append(b, byte(a.CommonAddr&0xFF))
 	if p.CommonAddrSize == 2 {
 		b = append(b, byte(a.CommonAddr>>8))
 	}
@@ -165,7 +165,7 @@ func (a *ASDU) AppendEncode(b []byte, p Params) ([]byte, error) {
 			}
 			switch {
 			case !a.Sequence || i == 0:
-				b = append(b, byte(ioa), byte(ioa>>8), byte(ioa>>16))[:len(b)+p.IOASize]
+				b = append(b, byte(ioa&0xFF), byte(ioa>>8&0xFF), byte(ioa>>16&0xFF))[:len(b)+p.IOASize]
 			case ioa != a.Objects[0].Address()+IOA(i):
 				return b[:start], fmt.Errorf("%w: object %d has address %d, want %d",
 					ErrNotSequential, i, ioa, a.Objects[0].Address()+IOA(i))

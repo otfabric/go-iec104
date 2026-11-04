@@ -155,8 +155,15 @@ const (
 	QOIGroup16 QOI = 36 // Interrogation of group 16
 )
 
-// QOIGroup returns the qualifier for interrogation group n (1..16).
-func QOIGroup(n int) QOI { return QOIStation + QOI(n) }
+// QOIGroup returns the qualifier for interrogation group n (1..16). For any
+// other n it returns 0, the qualifier "not used", instead of the qualifier
+// of another group or a reserved one.
+func QOIGroup(n int) QOI {
+	if n < 1 || n > 16 {
+		return 0
+	}
+	return QOIStation + QOI(n)
+}
 
 // Cause returns the cause of transmission the controlled station uses for
 // data sent in answer to an interrogation with this qualifier.
@@ -247,7 +254,7 @@ const (
 func appendCP24(b []byte, t Timestamp, loc *time.Location) []byte {
 	tt := t.In(loc)
 	ms := tt.Second()*1000 + tt.Nanosecond()/int(time.Millisecond)
-	return append(b, byte(ms), byte(ms>>8), byte(tt.Minute())|timeFlags(t))
+	return append(b, byte(ms&0xFF), byte(ms>>8&0xFF), byte(tt.Minute()&0x3F)|timeFlags(t))
 }
 
 func timeFlags(t Timestamp) byte {
@@ -266,16 +273,23 @@ func appendCP56(b []byte, t Timestamp, loc *time.Location) []byte {
 		t = Timestamp{Time: time.Date(2000, 1, 1, 0, 0, 0, 0, loc), Invalid: true}
 	}
 	tt := t.In(loc)
+	// CP56Time2a carries the year without its century; parseCP56 reads 70..99
+	// as 1970..1999 and 0..69 as 2000..2069. A time outside that window would
+	// come back in another century, so it goes out flagged invalid.
+	year := tt.Year()
+	if year < 1970 || year > 2069 {
+		t.Invalid = true
+	}
 	b = appendCP24(b, t, loc)
-	hour := byte(tt.Hour())
+	hour := byte(tt.Hour() & 0x1F)
 	if t.SummerTime {
 		hour |= 0x80
 	}
-	dow := byte(tt.Weekday())
+	dow := byte(tt.Weekday() & 0x07)
 	if dow == 0 {
 		dow = 7
 	}
-	return append(b, hour, byte(tt.Day())|dow<<5, byte(tt.Month()), byte(tt.Year()%100))
+	return append(b, hour, byte(tt.Day()&0x1F)|dow<<5, byte(tt.Month()&0x0F), byte((year%100+100)%100&0x7F))
 }
 
 func parseCP24(b []byte, loc *time.Location) Timestamp {

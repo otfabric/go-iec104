@@ -1133,11 +1133,12 @@ func (e *Endpoint) Protect(now time.Time, data []byte) ([][]byte, error) {
 // identifier and the association IDs are the additional data, the nonce is
 // the sequence number, and the length and ASDU are encrypted.
 func protect(p asdu.Params, h Header, sd SecureData, data []byte, dp DataProtection, key []byte) ([]byte, error) {
-	if len(data) == 0 || len(data) > 0xffff {
-		return nil, fmt.Errorf("%w: application data of %d octets", ErrMessage, len(data))
+	n := len(data)
+	if n == 0 || n > 0xffff {
+		return nil, fmt.Errorf("%w: application data of %d octets", ErrMessage, n)
 	}
 	h.Type, h.Cause = asdu.S_SD_NA_1, asdu.CauseDataProtection
-	plain := binary.LittleEndian.AppendUint16(make([]byte, 0, 2+len(data)), uint16(len(data)))
+	plain := binary.LittleEndian.AppendUint16(make([]byte, 0, 2+n), uint16(n))
 	plain = append(plain, data...)
 	if dp.MAC == nil {
 		g, err := newGCM(key)

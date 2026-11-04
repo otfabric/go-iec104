@@ -63,7 +63,7 @@ func (st *store) directory(_ *server.Session, _ asdu.CommonAddr, _ asdu.IOA) []a
 	defer st.mu.Unlock()
 	var out []asdu.FileDirectoryEntry
 	for ioa, e := range st.files {
-		out = append(out, asdu.FileDirectoryEntry{IOA: ioa, Name: e.name, Length: uint32(len(e.data)), Time: asdu.At(e.created)})
+		out = append(out, asdu.FileDirectoryEntry{IOA: ioa, Name: e.name, Length: uint32(min(len(e.data), asdu.MaxFileLength)), Time: asdu.At(e.created)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IOA < out[j].IOA })
 	return out

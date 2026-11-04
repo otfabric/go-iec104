@@ -214,7 +214,7 @@ func (o StepPosition) body(b []byte, _ *typeDesc) ([]byte, error) {
 	if o.Value < -64 || o.Value > 63 {
 		return b, rangeErr("step position", int(o.Value), -64, 63)
 	}
-	return append(b, byte(o.Value)&0x7F|bit(o.Transient, 0x80), byte(o.Quality&maskQDS)), nil
+	return append(b, byte(o.Value&0x7F)|bit(o.Transient, 0x80), byte(o.Quality&maskQDS)), nil
 }
 
 // Bitstring32 is a bitstring of 32 bit (BSI and QDS): M_BO_NA_1, M_BO_TA_1
@@ -250,7 +250,7 @@ func (o MeasuredNormalized) Address() IOA     { return o.IOA }
 func (MeasuredNormalized) kind() kind         { return kNormalized }
 func (o MeasuredNormalized) stamp() Timestamp { return o.Time }
 func (o MeasuredNormalized) body(b []byte, d *typeDesc) ([]byte, error) {
-	b = binary.LittleEndian.AppendUint16(b, uint16(o.Value))
+	b = appendI16(b, o.Value)
 	if d.id == M_ME_ND_1 {
 		return b, nil
 	}
@@ -271,7 +271,7 @@ func (o MeasuredScaled) Address() IOA     { return o.IOA }
 func (MeasuredScaled) kind() kind         { return kScaled }
 func (o MeasuredScaled) stamp() Timestamp { return o.Time }
 func (o MeasuredScaled) body(b []byte, _ *typeDesc) ([]byte, error) {
-	b = binary.LittleEndian.AppendUint16(b, uint16(o.Value))
+	b = appendI16(b, o.Value)
 	return append(b, byte(o.Quality&maskQDS)), nil
 }
 
@@ -313,7 +313,7 @@ func (o IntegratedTotal) body(b []byte, _ *typeDesc) ([]byte, error) {
 	if o.Sequence > 31 {
 		return b, rangeErr("counter sequence number", int(o.Sequence), 0, 31)
 	}
-	b = binary.LittleEndian.AppendUint32(b, uint32(o.Value))
+	b = appendI32(b, o.Value)
 	return append(b, o.Sequence|bit(o.Carry, 0x20)|bit(o.Adjusted, 0x40)|bit(o.Invalid, 0x80)), nil
 }
 
@@ -510,7 +510,7 @@ func (SetpointNormalized) kind() kind         { return kSetNormalized }
 func (o SetpointNormalized) stamp() Timestamp { return o.Time }
 func (o SetpointNormalized) body(b []byte, _ *typeDesc) ([]byte, error) {
 	q, err := setpointOctet(o.Qualifier, o.Select)
-	return append(binary.LittleEndian.AppendUint16(b, uint16(o.Value)), q), err
+	return append(appendI16(b, o.Value), q), err
 }
 
 // SetpointScaled is a scaled set-point command (SVA and QOS): C_SE_NB_1 and
@@ -529,7 +529,7 @@ func (SetpointScaled) kind() kind         { return kSetScaled }
 func (o SetpointScaled) stamp() Timestamp { return o.Time }
 func (o SetpointScaled) body(b []byte, _ *typeDesc) ([]byte, error) {
 	q, err := setpointOctet(o.Qualifier, o.Select)
-	return append(binary.LittleEndian.AppendUint16(b, uint16(o.Value)), q), err
+	return append(appendI16(b, o.Value), q), err
 }
 
 // SetpointFloat is a short floating point set-point command (IEEE 754 and
@@ -725,7 +725,7 @@ func (o ParameterNormalized) Address() IOA   { return o.IOA }
 func (ParameterNormalized) kind() kind       { return kParamNormalized }
 func (ParameterNormalized) stamp() Timestamp { return Timestamp{} }
 func (o ParameterNormalized) body(b []byte, _ *typeDesc) ([]byte, error) {
-	return append(binary.LittleEndian.AppendUint16(b, uint16(o.Value)), o.Qualifier), nil
+	return append(appendI16(b, o.Value), o.Qualifier), nil
 }
 
 // ParameterScaled is a parameter of a scaled measured value (SVA and QPM):
@@ -741,7 +741,7 @@ func (o ParameterScaled) Address() IOA   { return o.IOA }
 func (ParameterScaled) kind() kind       { return kParamScaled }
 func (ParameterScaled) stamp() Timestamp { return Timestamp{} }
 func (o ParameterScaled) body(b []byte, _ *typeDesc) ([]byte, error) {
-	return append(binary.LittleEndian.AppendUint16(b, uint16(o.Value)), o.Qualifier), nil
+	return append(appendI16(b, o.Value), o.Qualifier), nil
 }
 
 // ParameterFloat is a parameter of a short floating point measured value
@@ -826,7 +826,7 @@ func appendFileLength(b []byte, n uint32) ([]byte, error) {
 	if n > MaxFileLength {
 		return b, rangeErr("length of file or section", int(n), 0, MaxFileLength)
 	}
-	return append(b, byte(n), byte(n>>8), byte(n>>16)), nil
+	return append(b, byte(n&0xFF), byte(n>>8&0xFF), byte(n>>16&0xFF)), nil
 }
 
 func fileLength(b []byte) uint32 { return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 }
@@ -939,10 +939,11 @@ func (o FileSegment) Address() IOA   { return o.IOA }
 func (FileSegment) kind() kind       { return kFileSegment }
 func (FileSegment) stamp() Timestamp { return Timestamp{} }
 func (o FileSegment) body(b []byte, _ *typeDesc) ([]byte, error) {
-	if len(o.Data) > 255 {
-		return b, rangeErr("length of segment", len(o.Data), 0, 255)
+	n := len(o.Data)
+	if n > 255 {
+		return b, rangeErr("length of segment", n, 0, 255)
 	}
-	b = append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section, byte(len(o.Data)))
+	b = append(binary.LittleEndian.AppendUint16(b, o.Name), o.Section, byte(n))
 	return append(b, o.Data...), nil
 }
 
@@ -988,8 +989,24 @@ func (o FileQueryLog) body(b []byte, _ *typeDesc) ([]byte, error) {
 func u16(b []byte) uint16 { return binary.LittleEndian.Uint16(b) }
 func u32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 
+// i16 and i32 decode little-endian two's complement integers; appendI16 and
+// appendI32 encode them. Each octet is taken apart with a mask, so no
+// conversion between signed and unsigned types can change a value.
+func i16(b []byte) int16 { return int16(b[0]) | int16(b[1])<<8 }
+func i32(b []byte) int32 {
+	return int32(b[0]) | int32(b[1])<<8 | int32(b[2])<<16 | int32(b[3])<<24
+}
+
+func appendI16[T ~int16](b []byte, v T) []byte {
+	return append(b, byte(v&0xFF), byte(v>>8&0xFF))
+}
+
+func appendI32(b []byte, v int32) []byte {
+	return append(b, byte(v&0xFF), byte(v>>8&0xFF), byte(v>>16&0xFF), byte(v>>24&0xFF))
+}
+
 // vti decodes the 7-bit two's complement step position value.
-func vti(b byte) int8 { return int8(b<<1) >> 1 }
+func vti(b byte) int8 { return int8(b&0x3F) - int8(b&0x40) }
 
 func init() {
 	type dec = func(IOA, []byte, Timestamp, *typeDesc) InformationObject
@@ -1038,7 +1055,7 @@ func init() {
 		v{M_BO_NA_1, "M_BO_NA_1", tagNone}, v{M_BO_TA_1, "M_BO_TA_1", tagCP24}, v{M_BO_TB_1, "M_BO_TB_1", tagCP56})
 
 	decNormalized := func(a IOA, b []byte, ts Timestamp, d *typeDesc) InformationObject {
-		o := MeasuredNormalized{IOA: a, Value: Normalized(u16(b)), Time: ts}
+		o := MeasuredNormalized{IOA: a, Value: Normalized(i16(b)), Time: ts}
 		if d.id != M_ME_ND_1 {
 			o.Quality = Quality(b[2]) & maskQDS
 		}
@@ -1050,7 +1067,7 @@ func init() {
 		kNormalized, 2, tagNone, decNormalized)
 
 	variants(kScaled, 3, func(a IOA, b []byte, ts Timestamp, _ *typeDesc) InformationObject {
-		return MeasuredScaled{IOA: a, Value: int16(u16(b)), Quality: Quality(b[2]) & maskQDS, Time: ts}
+		return MeasuredScaled{IOA: a, Value: i16(b), Quality: Quality(b[2]) & maskQDS, Time: ts}
 	}, "Measured value, scaled",
 		v{M_ME_NB_1, "M_ME_NB_1", tagNone}, v{M_ME_TB_1, "M_ME_TB_1", tagCP24}, v{M_ME_TE_1, "M_ME_TE_1", tagCP56})
 
@@ -1060,7 +1077,7 @@ func init() {
 		v{M_ME_NC_1, "M_ME_NC_1", tagNone}, v{M_ME_TC_1, "M_ME_TC_1", tagCP24}, v{M_ME_TF_1, "M_ME_TF_1", tagCP56})
 
 	variants(kTotal, 5, func(a IOA, b []byte, ts Timestamp, _ *typeDesc) InformationObject {
-		return IntegratedTotal{IOA: a, Value: int32(u32(b)), Sequence: b[4] & 0x1F,
+		return IntegratedTotal{IOA: a, Value: i32(b), Sequence: b[4] & 0x1F,
 			Carry: b[4]&0x20 != 0, Adjusted: b[4]&0x40 != 0, Invalid: b[4]&0x80 != 0, Time: ts}
 	}, "Integrated totals",
 		v{M_IT_NA_1, "M_IT_NA_1", tagNone}, v{M_IT_TA_1, "M_IT_TA_1", tagCP24}, v{M_IT_TB_1, "M_IT_TB_1", tagCP56})
@@ -1104,11 +1121,11 @@ func init() {
 	}, "Regulating step command", v{C_RC_NA_1, "C_RC_NA_1", tagNone}, v{C_RC_TA_1, "C_RC_TA_1", tagCP56})
 
 	variants(kSetNormalized, 3, func(a IOA, b []byte, ts Timestamp, _ *typeDesc) InformationObject {
-		return SetpointNormalized{IOA: a, Value: Normalized(u16(b)), Qualifier: b[2] & 0x7F, Select: b[2]&0x80 != 0, Time: ts}
+		return SetpointNormalized{IOA: a, Value: Normalized(i16(b)), Qualifier: b[2] & 0x7F, Select: b[2]&0x80 != 0, Time: ts}
 	}, "Set-point command, normalized", v{C_SE_NA_1, "C_SE_NA_1", tagNone}, v{C_SE_TA_1, "C_SE_TA_1", tagCP56})
 
 	variants(kSetScaled, 3, func(a IOA, b []byte, ts Timestamp, _ *typeDesc) InformationObject {
-		return SetpointScaled{IOA: a, Value: int16(u16(b)), Qualifier: b[2] & 0x7F, Select: b[2]&0x80 != 0, Time: ts}
+		return SetpointScaled{IOA: a, Value: i16(b), Qualifier: b[2] & 0x7F, Select: b[2]&0x80 != 0, Time: ts}
 	}, "Set-point command, scaled", v{C_SE_NB_1, "C_SE_NB_1", tagNone}, v{C_SE_TB_1, "C_SE_TB_1", tagCP56})
 
 	variants(kSetFloat, 5, func(a IOA, b []byte, ts Timestamp, _ *typeDesc) InformationObject {
@@ -1150,11 +1167,11 @@ func init() {
 		})
 	register(P_ME_NA_1, "P_ME_NA_1", "Parameter of measured value, normalized", kParamNormalized, 3, tagNone,
 		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
-			return ParameterNormalized{IOA: a, Value: Normalized(u16(b)), Qualifier: b[2]}
+			return ParameterNormalized{IOA: a, Value: Normalized(i16(b)), Qualifier: b[2]}
 		})
 	register(P_ME_NB_1, "P_ME_NB_1", "Parameter of measured value, scaled", kParamScaled, 3, tagNone,
 		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {
-			return ParameterScaled{IOA: a, Value: int16(u16(b)), Qualifier: b[2]}
+			return ParameterScaled{IOA: a, Value: i16(b), Qualifier: b[2]}
 		})
 	register(P_ME_NC_1, "P_ME_NC_1", "Parameter of measured value, short floating point", kParamFloat, 5, tagNone,
 		func(a IOA, b []byte, _ Timestamp, _ *typeDesc) InformationObject {

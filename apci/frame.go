@@ -122,16 +122,16 @@ func (f Frame) AppendBinary(b []byte) ([]byte, error) {
 		if f.SendSeq > SeqMask || f.RecvSeq > SeqMask {
 			return b, fmt.Errorf("%w: sequence number out of range", ErrInvalidControl)
 		}
-		b = append(b, StartByte, byte(ControlLength+len(f.ASDU)),
-			byte(f.SendSeq<<1), byte(f.SendSeq>>7),
-			byte(f.RecvSeq<<1), byte(f.RecvSeq>>7))
+		b = append(b, StartByte, byte((ControlLength+len(f.ASDU))&0xFF),
+			byte(f.SendSeq<<1&0xFF), byte(f.SendSeq>>7&0xFF),
+			byte(f.RecvSeq<<1&0xFF), byte(f.RecvSeq>>7&0xFF))
 		return append(b, f.ASDU...), nil
 	case FormatS:
 		if f.RecvSeq > SeqMask {
 			return b, fmt.Errorf("%w: sequence number out of range", ErrInvalidControl)
 		}
 		return append(b, StartByte, ControlLength, 0x01, 0x00,
-			byte(f.RecvSeq<<1), byte(f.RecvSeq>>7)), nil
+			byte(f.RecvSeq<<1&0xFF), byte(f.RecvSeq>>7&0xFF)), nil
 	case FormatU:
 		if !f.Function.Valid() {
 			return b, fmt.Errorf("%w: U function 0x%02X", ErrInvalidControl, uint8(f.Function))

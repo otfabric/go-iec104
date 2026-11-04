@@ -114,11 +114,11 @@ func (st *Station) directory(_ *server.Session, ca asdu.CommonAddr, ioa asdu.IOA
 	}
 	var out []asdu.FileDirectoryEntry
 	for _, f := range st.files {
-		out = append(out, asdu.FileDirectoryEntry{IOA: f.IOA, Name: f.Name, Length: uint32(f.Size), Time: asdu.At(FixtureFileTime)})
+		out = append(out, asdu.FileDirectoryEntry{IOA: f.IOA, Name: f.Name, Length: fileLength(f.Size), Time: asdu.At(FixtureFileTime)})
 	}
 	st.mu.Lock()
 	for a, u := range st.uploads {
-		out = append(out, asdu.FileDirectoryEntry{IOA: a, Name: u.name, Length: uint32(u.file.Len()), Time: asdu.At(u.at)})
+		out = append(out, asdu.FileDirectoryEntry{IOA: a, Name: u.name, Length: fileLength(u.file.Len()), Time: asdu.At(u.at)})
 	}
 	st.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].IOA < out[j].IOA })
@@ -457,7 +457,7 @@ func (st *Station) command(s *server.Session, req *asdu.ASDU) {
 			next = pos
 		}
 		cmd.target.Value = next
-		report = asdu.New(asdu.Cause(cmd.ReportCause), st.ca, cmd.target.object(asdu.Now()))
+		report = asdu.New(asdu.Cause(cmd.ReportCause&0x3F), st.ca, cmd.target.object(asdu.Now()))
 		outcome = "executed"
 	}
 	st.mu.Unlock()
@@ -479,4 +479,13 @@ func (st *Station) command(s *server.Session, req *asdu.ASDU) {
 func (st *Station) Loopback() string {
 	_, port, _ := net.SplitHostPort(st.Addr)
 	return net.JoinHostPort("127.0.0.1", port)
+}
+
+// fileLength returns n as a length of file (LOF). A length that does not fit
+// returns asdu.MaxFileLength+1, which the encoder refuses.
+func fileLength(n int) uint32 {
+	if n < 0 || n > asdu.MaxFileLength {
+		return asdu.MaxFileLength + 1
+	}
+	return uint32(n)
 }

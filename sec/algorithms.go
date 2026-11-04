@@ -140,7 +140,7 @@ func keyWrap(kek, plain []byte) ([]byte, error) {
 			copy(b[:8], a[:])
 			copy(b[8:], out[8*i:8*i+8])
 			c.Encrypt(b[:], b[:])
-			binary.BigEndian.PutUint64(a[:], binary.BigEndian.Uint64(b[:8])^uint64(n*j+i))
+			binary.BigEndian.PutUint64(a[:], binary.BigEndian.Uint64(b[:8])^wrapStep(n, j, i))
 			copy(out[8*i:], b[8:])
 		}
 	}
@@ -165,7 +165,7 @@ func keyUnwrap(kek, wrapped []byte) ([]byte, error) {
 	var b [16]byte
 	for j := 5; j >= 0; j-- {
 		for i := n; i >= 1; i-- {
-			binary.BigEndian.PutUint64(b[:8], binary.BigEndian.Uint64(a[:])^uint64(n*j+i))
+			binary.BigEndian.PutUint64(b[:8], binary.BigEndian.Uint64(a[:])^wrapStep(n, j, i))
 			copy(b[8:], r[8*(i-1):8*i])
 			c.Decrypt(b[:], b[:])
 			copy(a[:], b[:8])
@@ -193,4 +193,14 @@ func gcmNonce(seq uint32) []byte {
 	n := make([]byte, 12)
 	binary.LittleEndian.PutUint32(n, seq)
 	return n
+}
+
+// wrapStep returns the step counter t = n*j+i of RFC 3394 key wrapping; it
+// is at least 1 for every step the wrap and unwrap loops take.
+func wrapStep(n, j, i int) uint64 {
+	t := n*j + i
+	if t < 0 {
+		return 0
+	}
+	return uint64(t)
 }
