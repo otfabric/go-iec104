@@ -338,7 +338,7 @@ func TestBroadcast(t *testing.T) {
 		}
 		return len(srv.Sessions()) == 3 && started == 2
 	})
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		n, err := srv.Broadcast(context.Background(), asdu.New(asdu.CauseSpontaneous, 1,
 			asdu.MeasuredScaled{IOA: 1, Value: int16(i)}))
 		if n != 2 || err != nil {
@@ -598,7 +598,7 @@ func TestBurstWithSlowHandler(t *testing.T) {
 	})))
 
 	const n = 1500
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := c.Send(ctx, asdu.New(asdu.CauseActivation, 1, asdu.SingleCommand{IOA: asdu.IOA(i + 1), Value: true}))
 		cancel()

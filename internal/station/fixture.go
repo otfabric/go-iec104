@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/otfabric/go-iec104/asdu"
@@ -47,7 +48,7 @@ type File struct {
 func (f File) Content() []byte {
 	b := make([]byte, f.Size)
 	for i := range b {
-		b[i] = byte((i + int(f.IOA)) % 251)
+		b[i] = byte((i + int(f.IOA)) % 251 & 0xFF)
 	}
 	return b
 }
@@ -101,14 +102,14 @@ func (o Observed) String() string {
 
 // JoinFlags joins quality flags the way [Observed] holds them.
 func JoinFlags(flags []string) string {
-	s := ""
+	var s strings.Builder
 	for i, f := range flags {
 		if i > 0 {
-			s += " "
+			s.WriteString(" ")
 		}
-		s += f
+		s.WriteString(f)
 	}
-	return s
+	return s.String()
 }
 
 // Expected returns what the station reports for the points selected by
@@ -259,6 +260,9 @@ func Parse(data []byte) (*Fixture, error) {
 	for i := range fx.Commands {
 		if fx.Commands[i].ReportCause == 0 {
 			fx.Commands[i].ReportCause = int(asdu.CauseReturnRemote)
+		}
+		if c := fx.Commands[i].ReportCause; c < 1 || c > 63 {
+			return nil, fmt.Errorf("command %d: report cause %d, want 1..63", i, c)
 		}
 	}
 	return fx, nil

@@ -177,10 +177,8 @@ func TestReentrantRequestsAcrossStops(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	var ok, refused atomic.Int32
-	for w := 0; w < 4; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for w := range 4 {
+		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
 				case <-stop:
@@ -202,9 +200,9 @@ func TestReentrantRequestsAcrossStops(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		if err := c.StopDT(ctx); err != nil {
 			t.Fatalf("StopDT: %v", err)
 		}
@@ -331,7 +329,7 @@ func TestReentrantSwitchHandler(t *testing.T) {
 // Close from many goroutines at once, with switchovers and requests in
 // flight: every Close returns only when the group is closed.
 func TestReentrantConcurrentGroupClose(t *testing.T) {
-	for round := 0; round < 15; round++ {
+	for round := range 15 {
 		a := orderingServe(t, server.HandlerFunc(confirming))
 		b := orderingServe(t, server.HandlerFunc(confirming))
 		var closed atomic.Bool
@@ -343,29 +341,25 @@ func TestReentrantConcurrentGroupClose(t *testing.T) {
 		}))
 		ctx := context.Background()
 		var wg sync.WaitGroup
-		for i := 0; i < 3; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for j := 0; j < 20; j++ {
+		for range 3 {
+			wg.Go(func() {
+				for range 20 {
 					_ = g.Switchover(ctx)
 					_ = g.Command(ctx, 1, asdu.SingleCommand{IOA: 1, Value: true})
 				}
-			}()
+			})
 		}
 		time.Sleep(time.Duration(round) * 3 * time.Millisecond)
 		var closers sync.WaitGroup
-		for i := 0; i < 4; i++ {
-			closers.Add(1)
-			go func() {
-				defer closers.Done()
+		for range 4 {
+			closers.Go(func() {
 				_ = g.Close()
 				for _, c := range g.Clients() {
 					if st := c.State(); st != iec104.StateDisconnected {
 						t.Errorf("round %d: %s is %s when Group.Close returned", round, c.Addr(), st)
 					}
 				}
-			}()
+			})
 		}
 		within(t, "concurrent Group.Close", closers.Wait)
 		closed.Store(true)
@@ -389,9 +383,7 @@ func TestReentrantGroupOneStarted(t *testing.T) {
 	})
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -400,8 +392,8 @@ func TestReentrantGroupOneStarted(t *testing.T) {
 				_ = g.Command(ctx, 1, asdu.SingleCommand{IOA: 1, Value: true})
 			}
 		}
-	}()
-	for i := 0; i < 40; i++ {
+	})
+	for i := range 40 {
 		before := g.Active()
 		if err := g.Switchover(ctx); err != nil {
 			t.Fatalf("Switchover %d: %v", i, err)
@@ -444,7 +436,7 @@ func TestCloseDeliversWhatWasAcknowledged(t *testing.T) {
 		got = append(got, a.First().(asdu.MeasuredScaled).Value)
 		mu.Unlock()
 	})))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if err := srv.Enqueue(asdu.New(asdu.CauseSpontaneous, 1, asdu.MeasuredScaled{IOA: 1, Value: int16(i)})); err != nil {
 			t.Fatal(err)
 		}
@@ -600,7 +592,7 @@ func TestGroupNotHeldByAStateHandler(t *testing.T) {
 	// answers, when it is its own dispatcher that is stuck there; the other
 	// one serves requests.
 	served := 0
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		before := g.Active()
 		within(t, "Switchover", func() {
 			if err := g.Switchover(ctx); err != nil {
@@ -708,7 +700,7 @@ func TestSwitchHandlerToldWhenSwitchoverReturns(t *testing.T) {
 		}
 		return established == 2 && calls.Load() == 1
 	})
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		before := calls.Load()
 		if err := g.Switchover(ctx); err != nil {
 			t.Fatalf("Switchover %d: %v", i, err)

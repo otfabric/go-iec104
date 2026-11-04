@@ -6,7 +6,7 @@ How to run each test tier of go-iec104. What is implemented and at which evidenc
 
 | Tier | Command | Prerequisites | Runs in CI |
 |---|---|---|---|
-| Unit and package tests, race detector | `make test` | none | CI workflow, Go 1.23 to 1.26 |
+| Unit and package tests, race detector | `make test` | none | CI workflow, Go 1.26 and 1.27 |
 | End-to-end, on loopback TCP | `make e2e` (also part of `make test`) | none | CI workflow |
 | Coverage gate | `make coverage-check` | none | CI workflow |
 | Per-package coverage floor | `make coverage-pkg-check` | none | CI workflow, `Per-package coverage` |
@@ -31,6 +31,7 @@ The `Extended` workflow runs nightly: every fuzz target for 5 minutes and the ch
   - `features_test.go` covers states, logs, metrics, retries, admission, the event queue and failing requests.
   - `statemachine_test.go` covers start, stop, close and switchover races.
   - `chaos_test.go` runs seeded random operations while connections are cut.
+  - `hostile_test.go` sends broken framing, control fields, sequence numbers, idle and flooding peers, malformed ASDUs and out-of-turn file transfer to the server, and plays a hostile station against the client; each case checks the time bound, that a legitimate client is then served, and goroutines. `FuzzServerStream` (in `hostile_fuzz_test.go`) feeds arbitrary octets to a running server over an in-memory connection.
 - **`interop`** (build tag `interop`): go-iec104 as client and as server against the images of [otfabric/iec104-interop](https://github.com/otfabric/iec104-interop). The images are pinned by digest in `interop/harness.go`, the Makefile and `.github/workflows/interop.yml`; keep the three in step.
 - **`interop/cbsigma`**: `sec` against cB-Sigma/iec60870 in memory.
 

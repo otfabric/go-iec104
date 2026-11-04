@@ -1,5 +1,35 @@
 # go-iec104 Releases
 
+## v0.2.0
+
+**Date:** 2026-11-04
+**Previous release:** v0.1.2
+
+### Breaking
+
+- Go 1.26 is the minimum (was 1.23). CI tests Go 1.26 and 1.27. HMAC-SHA3-256 (MAL 7 and 8) no longer depends on the Go version: it is always built.
+- `asdu.QOIGroup(n)` returns 0 (qualifier "not used") for `n` outside 1..16, instead of the qualifier of another group or a reserved one.
+
+### Fixed
+
+- CP56Time2a carries the year without its century, and the decoder reads 70..99 as 1970..1999 and 0..69 as 2000..2069. A time outside that window was encoded without notice and came back in another century; it now goes out flagged invalid (IV). A year before 0 also set bit 7 of the year octet, which is reserved.
+- File transfer: a section number past 255 or a length past 24 bits could wrap into a valid-looking one in the client and the server. They now reach the encoder as values it refuses.
+- The server reserved memory for the whole section length a client announced in an upload (up to 16 MiB per section ready, before any data): a peer could repeat file ready and section ready on many addresses until the station ran out of memory. It now reserves at most 64 KiB and grows with the data that arrives.
+- The client preallocated the whole file length a station announced (up to 16 MiB) when a download started; it now preallocates at most 64 KiB and grows with the data.
+- `client.GetFile` accepted segments and the last segment of a section other than the one it had called, and acknowledged the section positively. It now fails with `ErrProtocol`.
+- `server.Mux` passed an ASDU without information objects (VSQ of zero) to the handler, where `First()` is nil; a handler that indexed it panicked, and one that held a lock while doing so blocked every session. The Mux now refuses it with cause 44 (unknown type identification). A failing file-transfer reply to such an ASDU could also panic the session.
+
+### Security
+
+- Static analysis at the lowest thresholds (gosec, opengrep): 54 findings to 0, all fixed in code. Every narrowing integer conversion is range-checked or masked where it happens; `sec.LoadIdentity` cleans its paths.
+
+### Tests
+
+- Limits of every range-checked conversion: signed values, step positions, the CP56Time2a year window, segment and file lengths, address widths, security length fields, key wrap steps, fixture report causes. New fuzz targets `FuzzSignedValues` and `FuzzCP56`.
+- Hostile peers over TCP (`e2e/hostile_test.go`): broken framing, control fields, sequence numbers and state, idle and one-octet-at-a-time peers, floods, undecodable and zero-object ASDUs, unknown types, file transfer out of turn, against the server and, as a hostile station, against the client. Each case checks the bound, that a legitimate client is served afterwards and that no goroutine is left. `FuzzServerStream` feeds arbitrary octets to a running server over an in-memory connection.
+
+---
+
 ## v0.1.2
 
 **Date:** 2026-11-02

@@ -28,7 +28,7 @@ func TestOrderingHandlerCalledAfterCloseFromHandler(t *testing.T) {
 	st := newStation(t, server.WithStateHandler(func(s *server.Session, state iec104.State, err error) {
 		if state == iec104.StateStarted {
 			go func() {
-				for i := 0; i < 5; i++ {
+				for i := range 5 {
 					_ = s.Send(s.Context(), asdu.New(asdu.CauseSpontaneous, stationCA, asdu.SinglePoint{IOA: asdu.IOA(1 + i), Value: true}))
 				}
 			}()

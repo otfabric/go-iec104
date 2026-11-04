@@ -37,7 +37,7 @@ func stressServe(t *testing.T) (*server.Server, string) {
 // nothing is said after Close, and while it runs the group settles to
 // exactly one started connection, which is the active one.
 func TestReview2GroupStress(t *testing.T) {
-	for round := 0; round < 12; round++ {
+	for round := range 12 {
 		sa, a := stressServe(t)
 		sb, b := stressServe(t)
 		var closed atomic.Bool
@@ -70,7 +70,7 @@ func TestReview2GroupStress(t *testing.T) {
 		cancel()
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
-		for w := 0; w < 4; w++ {
+		for w := range 4 {
 			wg.Add(1)
 			go func(seed int64) {
 				defer wg.Done()
@@ -176,8 +176,7 @@ func TestReview2GroupCloseRacingSwitchover(t *testing.T) {
 			return false
 		})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() { defer wg.Done(); _ = g.Switchover(context.Background()) }()
+		wg.Go(func() { ; _ = g.Switchover(context.Background()) })
 		time.Sleep(time.Duration(round%20) * 100 * time.Microsecond)
 		_ = g.Close()
 		closed.Store(true)

@@ -179,14 +179,13 @@ func TestFileDownloadFaults(t *testing.T) {
 			addr := serveHandler(t, sc)
 			c := dial(t, addr)
 			got, err := c.GetFile(context.Background(), 1, 1, 1)
-			var neg *iec104.NegativeError
 			switch {
 			case tc.wantData != nil:
 				if err != nil || !bytes.Equal(got, tc.wantData) {
 					t.Fatalf("GetFile = %v, %v", got, err)
 				}
 			case tc.negative:
-				if !errors.As(err, &neg) {
+				if _, ok := errors.AsType[*iec104.NegativeError](err); !ok {
 					t.Fatalf("error = %v, want *iec104.NegativeError", err)
 				}
 			default:
@@ -279,19 +278,18 @@ func TestTerminationIsNotAConfirmation(t *testing.T) {
 	}))
 	c := dial(t, addr)
 	ctx := context.Background()
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		if err := c.Command(ctx, 1, asdu.SingleCommand{IOA: 1, Value: true}); err != nil {
 			t.Fatalf("command %d: %v", i, err)
 		}
 		// The termination of the first is on its way while this one is sent.
 		err := c.Command(ctx, 1, asdu.SingleCommand{IOA: 1, Value: true})
-		var neg *iec104.NegativeError
-		if !errors.As(err, &neg) {
+		if _, ok := errors.AsType[*iec104.NegativeError](err); !ok {
 			t.Fatalf("command %d refused by the station: client returned %v", i, err)
 		}
 	}
 	// Likewise an interrogation ends with its own termination.
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		data, err := c.Interrogate(ctx, 1, asdu.QOIStation)
 		if err != nil || len(data) != 1 {
 			t.Fatalf("interrogation %d: %d ASDUs, %v", i, len(data), err)
@@ -336,7 +334,6 @@ func TestPutFileFaults(t *testing.T) {
 			sc := &script{answers: tc.answers}
 			c := dial(t, serveHandler(t, sc))
 			err := c.PutFile(context.Background(), 1, 1, 1, data)
-			var neg *iec104.NegativeError
 			switch {
 			case tc.ok:
 				if err != nil {
@@ -369,7 +366,7 @@ func TestPutFileFaults(t *testing.T) {
 					t.Errorf("the station was sent: %s", got)
 				}
 			case tc.negative:
-				if !errors.As(err, &neg) {
+				if _, ok := errors.AsType[*iec104.NegativeError](err); !ok {
 					t.Fatalf("error = %v, want *iec104.NegativeError", err)
 				}
 			default:

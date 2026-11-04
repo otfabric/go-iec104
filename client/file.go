@@ -133,7 +133,8 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 		return nil, err
 	}
 
-	data := make([]byte, 0, ready.Length)
+	// The length is the station's claim: preallocate at most 64 KiB of it.
+	data := make([]byte, 0, min(ready.Length, 64<<10))
 	for {
 		a, o, err := f.next()
 		if err != nil {
@@ -146,7 +147,7 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 				return nil, unexpected(o, "section ready or last section")
 			}
 			// Last section: the checksum covers the whole file.
-			good := v.Checksum == fileChecksum(data) && uint32(len(data)) == ready.Length
+			good := v.Checksum == fileChecksum(data) && int64(len(data)) == int64(ready.Length)
 			ack := asdu.FileAck{IOA: ioa, Name: name, Section: v.Section, Qualifier: asdu.AckFilePositive}
 			if !good {
 				ack.Qualifier = asdu.AckFileNegative
@@ -181,7 +182,11 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 			}
 			switch v := o.(type) {
 			case asdu.FileSegment:
-				if uint32(len(data)+len(v.Data)) > ready.Length {
+				if v.Section != section.Section {
+					return nil, fmt.Errorf("%w: file transfer: segment of section %d, want %d",
+						iec104.ErrProtocol, v.Section, section.Section)
+				}
+				if int64(len(data)+len(v.Data)) > int64(ready.Length) {
 					return nil, fmt.Errorf("%w: file transfer: more data than the announced %d octets",
 						iec104.ErrProtocol, ready.Length)
 				}
@@ -190,7 +195,7 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 				if v.Qualifier != asdu.LastSectionNoDeactivation && v.Qualifier != asdu.LastSectionDeactivation {
 					return nil, unexpected(o, "a segment or last segment")
 				}
-				good := v.Checksum == fileChecksum(data[start:]) && uint32(len(data)-start) == section.Length
+				good := v.Section == section.Section && v.Checksum == fileChecksum(data[start:]) && int64(len(data)-start) == int64(section.Length)
 				ack := asdu.FileAck{IOA: ioa, Name: name, Section: section.Section, Qualifier: asdu.AckSectionPositive}
 				if !good {
 					ack.Qualifier = asdu.AckSectionNegative
@@ -291,8 +296,8 @@ func (c *Client) putFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 	}
 	var all uint8
 	for i, data := range sections {
-		nos := uint8(i + 1)
-		ready := asdu.SectionReady{IOA: ioa, Name: name, Section: nos, Length: uint32(len(data))}
+		nos := sectionNumber(i)
+		ready := asdu.SectionReady{IOA: ioa, Name: name, Section: nos, Length: fileLength(len(data))}
 		if err := f.send(ready); err != nil {
 			return err
 		}
@@ -316,7 +321,7 @@ func (c *Client) putFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 			return err
 		}
 	}
-	last := asdu.FileLastSegment{IOA: ioa, Name: name, Section: uint8(len(sections) + 1),
+	last := asdu.FileLastSegment{IOA: ioa, Name: name, Section: sectionNumber(len(sections)),
 		Qualifier: asdu.LastFileNoDeactivation, Checksum: all}
 	if err := f.send(last); err != nil {
 		return err
@@ -373,4 +378,25 @@ func (c *Client) listFiles(ctx context.Context, req *asdu.ASDU) ([]asdu.FileDire
 			}
 		}
 	}
+}
+
+// sectionNumber returns the number on the wire (NOS, from 1) of the section
+// at index i (from 0). An index past section 255 returns 0, which no section
+// has.
+func sectionNumber(i int) uint8 {
+	n := i + 1
+	if n < 1 || n > 255 {
+		return 0
+	}
+	return uint8(n)
+}
+
+// fileLength returns n as a length of file or section. A length that does
+// not fit returns asdu.MaxFileLength+1, which the encoder refuses, instead
+// of a wrapped length.
+func fileLength(n int) uint32 {
+	if n < 0 || n > asdu.MaxFileLength {
+		return asdu.MaxFileLength + 1
+	}
+	return uint32(n)
 }

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-//go:build go1.24
-
 package sec
 
 import "testing"

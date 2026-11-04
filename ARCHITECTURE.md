@@ -64,7 +64,7 @@ iec104 (root)      errors, State, Logger, Metrics
   `*sec.Endpoint` satisfies.
 - `sec` imports `asdu` for the field sizes and type identifications only,
   and nothing outside the standard library: the cryptography is
-  `crypto/...`, HMAC-SHA3 needs Go 1.24 and is left out of older builds.
+  `crypto/...`.
 - `client` and `server` never import each other (their tests do, to use the
   other side as a peer).
 - The root package imports `apci` and `asdu` only for the types in its

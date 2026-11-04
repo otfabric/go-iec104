@@ -263,7 +263,7 @@ for what it protects and where it came from.
 | Key agreement | ECDH on secp256r1 or Curve25519 |
 | Key derivation | HKDF with the hash of the MAC algorithm |
 | Key wrap (KWA) | 2, AES-256 key wrap (RFC 3394) |
-| MAC algorithms (MAL) | 3 HMAC-SHA-256/8, 4 HMAC-SHA-256/16 (default), 7 and 8 HMAC-SHA3-256/8 and /16 (built with Go 1.24 or later) |
+| MAC algorithms (MAL) | 3 HMAC-SHA-256/8, 4 HMAC-SHA-256/16 (default), 7 and 8 HMAC-SHA3-256/8 and /16 |
 | Data protection (DPA) | the MAC algorithms above, 11 AES-256-GCM |
 | Certificates | X.509, self-signed and pinned, or issued by a trusted Central Authority, optionally restricted by subject |
 | Role-based access control | the seven roles of IEC TS 60870-5-7, configured per association; refusals with cause 17 |

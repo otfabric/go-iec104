@@ -219,7 +219,11 @@ func (f *FileServer) HandleASDU(s *Session, a *asdu.ASDU) {
 		err = s.Reject(a, asdu.CauseUnknownType)
 	}
 	if err != nil {
-		key := fileKey{s, a.CommonAddr, a.First().Address()}
+		var ioa asdu.IOA
+		if o := a.First(); o != nil {
+			ioa = o.Address()
+		}
+		key := fileKey{s, a.CommonAddr, ioa}
 		s.log.Warn("file transfer stopped", "ca", a.CommonAddr, "ioa", uint32(key.ioa), "error", err)
 		if t := f.take(key); t != nil {
 			f.done(key, t, err)
@@ -355,7 +359,9 @@ func (f *FileServer) receive(s *Session, a *asdu.ASDU) error {
 			return refuse()
 		}
 		u.open, u.nos, u.want = true, o.Section, int(o.Length)
-		u.sections = append(u.sections, make([]byte, 0, o.Length))
+		// The length is the peer's claim: memory grows with the data that
+		// arrives, from at most 64 KiB reserved.
+		u.sections = append(u.sections, make([]byte, 0, min(o.Length, 64<<10)))
 		return f.send(s, a.CommonAddr, asdu.FileCall{IOA: o.IOA, Name: o.Name, Section: o.Section, Qualifier: asdu.SectionRequest})
 
 	case asdu.FileSegment:
@@ -464,11 +470,11 @@ func (f *FileServer) send(s *Session, ca asdu.CommonAddr, obj asdu.InformationOb
 func (f *FileServer) sectionReady(key fileKey, t *fileTransfer) error {
 	if t.section < len(t.file.Sections) {
 		return f.send(key.s, key.ca, asdu.SectionReady{
-			IOA: key.ioa, Name: t.name, Section: uint8(t.section + 1), Length: uint32(len(t.file.Sections[t.section])),
+			IOA: key.ioa, Name: t.name, Section: sectionNumber(t.section), Length: fileLength(len(t.file.Sections[t.section])),
 		})
 	}
 	return f.send(key.s, key.ca, asdu.FileLastSegment{
-		IOA: key.ioa, Name: t.name, Section: uint8(t.section + 1),
+		IOA: key.ioa, Name: t.name, Section: sectionNumber(t.section),
 		Qualifier: asdu.LastFileNoDeactivation, Checksum: fileChecksum(t.file.Sections...),
 	})
 }
@@ -494,7 +500,7 @@ func (f *FileServer) call(s *Session, a *asdu.ASDU, o asdu.FileCall) error {
 				iec104.ErrProtocol, n, file.Len())
 		}
 		f.put(key, &fileTransfer{name: o.Name, file: file})
-		return f.send(s, a.CommonAddr, asdu.FileReady{IOA: o.IOA, Name: o.Name, Length: uint32(file.Len())})
+		return f.send(s, a.CommonAddr, asdu.FileReady{IOA: o.IOA, Name: o.Name, Length: fileLength(file.Len())})
 
 	case asdu.FileRequest:
 		t := f.get(key, o.Name)
@@ -556,4 +562,25 @@ func (f *FileServer) ack(s *Session, a *asdu.ASDU, o asdu.FileAck) error {
 	f.take(key)
 	f.done(key, t, ErrFileNotAcknowledged)
 	return nil
+}
+
+// sectionNumber returns the number on the wire (NOS, from 1) of the section
+// at index i (from 0). An index past section 255 returns 0, which no section
+// has.
+func sectionNumber(i int) uint8 {
+	n := i + 1
+	if n < 1 || n > 255 {
+		return 0
+	}
+	return uint8(n)
+}
+
+// fileLength returns n as a length of file or section. A length that does
+// not fit returns asdu.MaxFileLength+1, which the encoder refuses, instead
+// of a wrapped length.
+func fileLength(n int) uint32 {
+	if n < 0 || n > asdu.MaxFileLength {
+		return asdu.MaxFileLength + 1
+	}
+	return uint32(n)
 }

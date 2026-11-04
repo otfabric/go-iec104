@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   ci:
-    uses: otfabric/.github/.github/workflows/go-ci.yml@v3.3.0
+    uses: otfabric/.github/.github/workflows/go-ci.yml@v3.3.1
     with:
       run-govulncheck: true
       coverage-min: "90"
@@ -24,7 +24,7 @@ jobs:
       # Coverage across the production packages, as make coverage measures it: the
       # e2e suite exercises them. make coverpkg-check keeps it equal to COVER_PKGS.
       coverpkg: github.com/otfabric/go-iec104,github.com/otfabric/go-iec104/apci,github.com/otfabric/go-iec104/asdu,github.com/otfabric/go-iec104/client,github.com/otfabric/go-iec104/internal/link,github.com/otfabric/go-iec104/internal/logx,github.com/otfabric/go-iec104/sec,github.com/otfabric/go-iec104/server
-      go-versions: '["1.23", "1.24", "1.25", "1.26"]'
+      go-versions: '["1.26", "1.27"]'
     secrets: inherit
 
   # go-ci gates the total; this gates each package (COVER_PKG_MIN).
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.x"
       - run: make coverpkg-check coverage-pkg-check
 
   # The self-contained examples must keep running as they are.
@@ -46,5 +46,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.x"
       - run: make build examples

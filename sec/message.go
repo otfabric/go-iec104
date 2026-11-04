@@ -47,7 +47,7 @@ func (h Header) append(b []byte, p asdu.Params) []byte {
 	if p.CauseSize == 2 {
 		b = append(b, h.Originator)
 	}
-	b = append(b, byte(h.CommonAddr))
+	b = append(b, byte(h.CommonAddr&0xFF))
 	if p.CommonAddrSize == 2 {
 		b = append(b, byte(h.CommonAddr>>8))
 	}
@@ -197,13 +197,14 @@ func appendIDs(b []byte, aim, ais uint16) []byte {
 
 // appendLen appends the length of v in size octets.
 func appendLen(b, v []byte, size int, what string) ([]byte, error) {
-	if len(v) >= 1<<(8*size) {
-		return nil, fmt.Errorf("%w: %s of %d octets", ErrMessage, what, len(v))
+	n := len(v)
+	switch {
+	case size == 1 && n <= 0xFF:
+		return append(b, byte(n)), nil
+	case size != 1 && n <= 0xFFFF:
+		return binary.LittleEndian.AppendUint16(b, uint16(n)), nil
 	}
-	if size == 1 {
-		return append(b, byte(len(v))), nil
-	}
-	return binary.LittleEndian.AppendUint16(b, uint16(len(v))), nil
+	return nil, fmt.Errorf("%w: %s of %d octets", ErrMessage, what, n)
 }
 
 func appendTag(b, tag []byte, mac bool) []byte {
@@ -262,7 +263,7 @@ func (m SessionInitiationRequest) appendBody(b []byte, mac bool) ([]byte, error)
 	if err := checkRandom(m.Random, "session initiation request"); err != nil {
 		return nil, err
 	}
-	b = append(appendIDs(b, m.AIM, m.AIS), byte(len(m.Random)))
+	b = append(appendIDs(b, m.AIM, m.AIS), byte(min(len(m.Random), 64))) // checkRandom: 4..64
 	return appendTag(append(b, m.Random...), m.Tag, mac), nil
 }
 

@@ -145,7 +145,7 @@ func TestReview2GroupCloseDoesNotWaitForSwitchHandler(t *testing.T) {
 // now fails at once, every time, and says why.
 func TestReview2RequestFromStateHandlerIsARace(t *testing.T) {
 	addr := orderingServe(t, server.HandlerFunc(confirming))
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		var c *client.Client
 		res := make(chan error, 1)
 		ready := make(chan struct{})
