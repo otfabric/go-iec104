@@ -1,6 +1,6 @@
 # Feature status
 
-What go-iec104 implements and what evidence backs it. Status: go-iec104 v0.0.5, qualified against [iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0). The type identifications and causes, clause by clause, are in [INTEROPERABILITY.md](../INTEROPERABILITY.md); what is out of scope is in [LIMITATIONS.md](../LIMITATIONS.md).
+What go-iec104 implements and what evidence backs it. Status: go-iec104 v0.2.0, qualified against [iec104-interop v0.5.0](https://github.com/otfabric/iec104-interop/releases/tag/v0.5.0). The type identifications and causes, clause by clause, are in [INTEROPERABILITY.md](../INTEROPERABILITY.md); what is out of scope is in [LIMITATIONS.md](../LIMITATIONS.md).
 
 None of this is a conformance claim: nothing is certified, and nothing has been run against certified test equipment or field devices.
 
@@ -8,7 +8,8 @@ None of this is a conformance claim: nothing is certified, and nothing has been 
 
 | go-iec104 | Go | iec104-interop | Supported |
 |---|---|---|---|
-| **v0.0.5** | 1.23 or later (CI: 1.23 to 1.26) | v0.3.1 | **yes** |
+| **v0.2.0** | 1.26 or later (CI: 1.26 and 1.27) | v0.5.0 | **yes** |
+| v0.0.5 to v0.1.2 | 1.23 or later | v0.3.1 to v0.5.0 | best effort |
 | < v0.0.5 | 1.23 or later | older | best effort |
 
 Support policy: [SECURITY.md](../SECURITY.md#supported-versions).
@@ -21,8 +22,6 @@ The library is pure Go with no dependencies outside the standard library.
 |---|---|---|
 | Linux amd64 | the full test suite, the interop suite and `interop/cbsigma` in CI | |
 | Linux arm64, Linux arm, macOS arm64, Windows amd64 | `make cross`, build only, not in CI | tests are not run there by CI |
-
-HMAC-SHA3-256 is present only when built with Go 1.24 or later (`sec/algorithms_sha3.go`).
 
 ## 3. Feature support
 

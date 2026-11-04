@@ -25,8 +25,7 @@ type MACAlgorithm struct {
 
 // The MAC algorithms. HMAC-SHA-256 is mandatory: truncated to 16 octets on
 // TCP/IP, which is the default here, and to 8 on serial links. HMAC-SHA3-256
-// (codes 7 and 8) is available when the module is built with Go 1.24 or
-// later. BLAKE2s (codes 9 and 10) is not implemented.
+// (codes 7 and 8) is optional. BLAKE2s (codes 9 and 10) is not implemented.
 var (
 	HMACSHA256Serial = MACAlgorithm{"HMAC-SHA-256/8", 3, sha256.New, 8}
 	HMACSHA256       = MACAlgorithm{"HMAC-SHA-256/16", 4, sha256.New, 16}

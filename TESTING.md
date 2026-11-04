@@ -6,7 +6,7 @@ How to run each test tier of go-iec104. What is implemented and at which evidenc
 
 | Tier | Command | Prerequisites | Runs in CI |
 |---|---|---|---|
-| Unit and package tests, race detector | `make test` | none | CI workflow, Go 1.23 to 1.26 |
+| Unit and package tests, race detector | `make test` | none | CI workflow, Go 1.26 and 1.27 |
 | End-to-end, on loopback TCP | `make e2e` (also part of `make test`) | none | CI workflow |
 | Coverage gate | `make coverage-check` | none | CI workflow |
 | Per-package coverage floor | `make coverage-pkg-check` | none | CI workflow, `Per-package coverage` |

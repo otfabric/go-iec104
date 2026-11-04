@@ -1,6 +1,6 @@
 # go-iec104 - IEC 60870-5-104 Client and Server Library for Go
 
-[![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.26%2B-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![Go Reference](https://pkg.go.dev/badge/github.com/otfabric/go-iec104.svg)](https://pkg.go.dev/github.com/otfabric/go-iec104)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI Status](https://github.com/otfabric/go-iec104/actions/workflows/ci.yml/badge.svg)](https://github.com/otfabric/go-iec104/actions/workflows/ci.yml)
@@ -142,7 +142,7 @@ IEC 60870-5-104 library.
 go get github.com/otfabric/go-iec104
 ```
 
-Requires Go 1.23 or later.
+Requires Go 1.26 or later.
 
 ## Project structure
 

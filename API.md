@@ -800,7 +800,7 @@ type State struct{ /* association IDs, algorithms, update keys, remote certifica
 
 ```go
 var HMACSHA256, HMACSHA256Serial MACAlgorithm          // MAL 4 (16 octets), 3 (8 octets)
-var HMACSHA3_256, HMACSHA3_256Serial MACAlgorithm      // MAL 8, 7; Go 1.24 and later
+var HMACSHA3_256, HMACSHA3_256Serial MACAlgorithm      // MAL 8, 7
 const AES256GCM uint8 = 11                             // DPA
 const KeyWrapAES256 uint8 = 2                          // KWA
 func MACByCode(code uint8) (MACAlgorithm, bool)
