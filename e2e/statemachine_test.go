@@ -54,7 +54,7 @@ func TestStartStopStaysInStep(t *testing.T) {
 		session := onlySession(t, l.st.Server)
 		event := asdu.New(asdu.CauseSpontaneous, l.ca, asdu.SinglePoint{IOA: 100, Value: true})
 
-		for i := 0; i < 200; i++ {
+		for i := range 200 {
 			if err := c.StartDT(ctx); err != nil {
 				t.Fatalf("cycle %d: StartDT: %v", i, err)
 			}
@@ -100,12 +100,12 @@ func TestStartStopStaysInStep(t *testing.T) {
 			}
 		}
 		// Repeating a transition that is already made changes nothing.
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			if err := c.StopDT(ctx); err != nil || session.Started() {
 				t.Fatalf("StopDT while stopped: %v", err)
 			}
 		}
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			if err := c.StartDT(ctx); err != nil || !session.Started() {
 				t.Fatalf("StartDT while started: %v", err)
 			}
@@ -257,14 +257,12 @@ func TestLifecycleUnderChurn(t *testing.T) {
 	var wg sync.WaitGroup
 	var clientTraces []*trace
 	var requests, confirmed atomic.Int64
-	for i := 0; i < clients; i++ {
+	for i := range clients {
 		tr := &trace{}
 		clientTraces = append(clientTraces, tr)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rng := rand.New(rand.NewSource(int64(i) + 1))
-			for round := 0; round < rounds; round++ {
+			for range rounds {
 				c, err := client.Dial(ctx, addr, client.WithParams(testutil.Params()),
 					client.WithAutoStart(rng.Intn(2) == 0), client.WithRequestTimeout(2*time.Second),
 					client.WithStateHandler(func(s iec104.State, _ error) { tr.add(stateLetter(s)) }))
@@ -296,14 +294,12 @@ func TestLifecycleUnderChurn(t *testing.T) {
 				// One connection per trace entry: mark the boundary.
 				tr.add('|')
 			}
-		}()
+		})
 	}
 	// The station drops sessions under the clients' feet.
 	stop := make(chan struct{})
 	var dropper sync.WaitGroup
-	dropper.Add(1)
-	go func() {
-		defer dropper.Done()
+	dropper.Go(func() {
 		rng := rand.New(rand.NewSource(99))
 		for {
 			select {
@@ -315,7 +311,7 @@ func TestLifecycleUnderChurn(t *testing.T) {
 				_ = all[rng.Intn(len(all))].Close()
 			}
 		}
-	}()
+	})
 	wg.Wait()
 	close(stop)
 	dropper.Wait()
@@ -385,12 +381,10 @@ func TestConcurrentControl(t *testing.T) {
 
 		storm := func(n int) {
 			var wg sync.WaitGroup
-			for g := 0; g < 8; g++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+			for g := range 8 {
+				wg.Go(func() {
 					rng := rand.New(rand.NewSource(int64(g)))
-					for i := 0; i < n; i++ {
+					for i := range n {
 						var err error
 						switch rng.Intn(6) {
 						case 0:
@@ -417,11 +411,11 @@ func TestConcurrentControl(t *testing.T) {
 							t.Errorf("goroutine %d: %v", g, err)
 						}
 					}
-				}()
+				})
 			}
 			wg.Wait()
 		}
-		for round := 0; round < 5; round++ {
+		for round := range 5 {
 			storm(40)
 			// Quiet: the connection survived, and both sides say the same.
 			if c.State() != iec104.StateStarted && c.State() != iec104.StateStopped {
@@ -463,7 +457,7 @@ func TestNothingAfterClose(t *testing.T) {
 		srv := l.st.Server
 		event := asdu.New(asdu.CauseSpontaneous, l.ca, asdu.MeasuredScaled{IOA: 201, Value: 1})
 
-		for round := 0; round < 20; round++ {
+		for round := range 20 {
 			var closed atomic.Bool
 			var after atomic.Int64
 			c := l.dial(t,
@@ -514,11 +508,9 @@ func TestNothingAfterClose(t *testing.T) {
 	}))
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		c := connect(t, addr, client.WithRequestTimeout(time.Second))
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				err := c.Command(ctx, 1, asdu.SingleCommand{IOA: asdu.IOA(i + 1)})
 				if err != nil {
@@ -528,7 +520,7 @@ func TestNothingAfterClose(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	time.Sleep(20 * time.Millisecond)
 	if err := srv.Close(); err != nil {
@@ -576,7 +568,7 @@ func TestSwitchoverStaysInStep(t *testing.T) {
 		}
 		return n
 	}
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		if err := g.Switchover(ctx); err != nil {
 			t.Fatalf("switchover %d: %v", i, err)
 		}
@@ -627,13 +619,13 @@ func TestPendingRequestsWhenTransferStops(t *testing.T) {
 	ctx := context.Background()
 	c := connect(t, addr, client.WithRequestTimeout(30*time.Second))
 
-	for round := 0; round < 50; round++ {
+	for round := range 50 {
 		// Unanswered requests, then STOPDT.
 		silent.Store(true)
 		unanswered.Store(0)
 		const waiting = 5
 		errs := make(chan error, waiting)
-		for i := 0; i < waiting; i++ {
+		for i := range waiting {
 			go func() {
 				_, err := c.Read(ctx, 1, asdu.IOA(100+i))
 				errs <- err
@@ -644,7 +636,7 @@ func TestPendingRequestsWhenTransferStops(t *testing.T) {
 		if err := c.StopDT(ctx); err != nil {
 			t.Fatalf("round %d: StopDT: %v", round, err)
 		}
-		for i := 0; i < waiting; i++ {
+		for range waiting {
 			select {
 			case err := <-errs:
 				if !errors.Is(err, iec104.ErrNotStarted) {
@@ -661,7 +653,7 @@ func TestPendingRequestsWhenTransferStops(t *testing.T) {
 		if err := c.StartDT(ctx); err != nil {
 			t.Fatalf("round %d: StartDT: %v", round, err)
 		}
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			a, err := c.Read(ctx, 1, asdu.IOA(200+i))
 			if err != nil || a.First().(asdu.MeasuredScaled).Value != 7 {
 				t.Fatalf("round %d: Read in the new period: %v", round, err)
@@ -672,7 +664,7 @@ func TestPendingRequestsWhenTransferStops(t *testing.T) {
 	// An answer that is already there when the stop comes is not lost: the
 	// station confirms the stop after its last I frame.
 	lost := 0
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		got := make(chan error, 1)
 		go func() {
 			_, err := c.Read(ctx, 1, 300)
@@ -707,7 +699,7 @@ func TestPendingRequestsWhenTransferStops(t *testing.T) {
 // nothing after Close has returned.
 func TestCloseRacingConnectionLoss(t *testing.T) {
 	station, saddr := serve(t, &echo{})
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		var tr trace
 		var closed atomic.Bool
 		var after atomic.Int64
@@ -719,12 +711,10 @@ func TestCloseRacingConnectionLoss(t *testing.T) {
 		}))
 		session := onlySession(t, station)
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			time.Sleep(time.Duration(i%6) * 20 * time.Microsecond)
 			_ = session.Close()
-		}()
+		})
 		time.Sleep(time.Duration(i%5) * 25 * time.Microsecond)
 		_ = c.Close()
 		closed.Store(true)

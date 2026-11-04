@@ -264,7 +264,7 @@ func Decode(b []byte, p Params) (*ASDU, error) {
 	maxIOA := IOA(1)<<(8*p.IOASize) - 1
 	a.Objects = make([]InformationObject, 0, n)
 	var ioa IOA
-	for k := 0; k < n; k++ {
+	for k := range n {
 		if !a.Sequence || k == 0 {
 			ioa = 0
 			for j := p.IOASize - 1; j >= 0; j-- {

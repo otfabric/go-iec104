@@ -258,15 +258,13 @@ func TestFileTransfersPerSession(t *testing.T) {
 
 	b := connect(t, addr)
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		c := connect(t, addr)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if got, err := c.GetFile(ctx, 1, 1, 1); err != nil || len(got) != 3000 {
 				t.Errorf("concurrent GetFile: %d octets, %v", len(got), err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	_ = a.Close()
@@ -560,7 +558,7 @@ func TestFileDirectory(t *testing.T) {
 		// Runs and gaps; one entry arrives already marked as the last.
 		3: {entry(1, 1), entry(2, 2), entry(3, 3), entry(8, 4), entry(9, 5)},
 	}
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		dirs[1] = append(dirs[1], entry(asdu.IOA(1000+i), i))
 	}
 	dirs[3][1].Status |= asdu.FileLastOfDirectory

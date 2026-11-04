@@ -135,7 +135,7 @@ func keyWrap(kek, plain []byte) ([]byte, error) {
 	copy(out[8:], plain)
 	a := keyWrapIV
 	var b [16]byte
-	for j := 0; j < 6; j++ {
+	for j := range 6 {
 		for i := 1; i <= n; i++ {
 			copy(b[:8], a[:])
 			copy(b[8:], out[8*i:8*i+8])

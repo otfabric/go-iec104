@@ -181,7 +181,7 @@ func messages(t *testing.T) []*asdu.ASDU {
 	// Sequences of elements (SQ = 1): one address, consecutive objects.
 	seq := func(n int, at func(i int) asdu.InformationObject) {
 		a := asdu.New(asdu.CauseInterrogatedStation, 1)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			a.Objects = append(a.Objects, at(i))
 		}
 		a.Type, a.Sequence = asdu.TypeOf(a.Objects[0]), true
@@ -199,7 +199,7 @@ func messages(t *testing.T) []*asdu.ASDU {
 	})
 	// As many objects as an APDU holds without a sequence.
 	big := asdu.New(asdu.CauseInterrogatedStation, 1)
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		big.Objects = append(big.Objects, asdu.SinglePoint{IOA: asdu.IOA(i * 7919), Value: i%3 == 0})
 	}
 	big.Type = asdu.TypeOf(big.Objects[0])
@@ -213,7 +213,7 @@ func messages(t *testing.T) []*asdu.ASDU {
 	// codec: on a connection without the A-Profile they travel as raw
 	// payload too, with their own causes.
 	n := 0
-	for id := 0; id < 256; id++ {
+	for id := range 256 {
 		typ := asdu.TypeID(id)
 		if !typ.IsSecurity() {
 			continue
@@ -236,7 +236,7 @@ func TestWireMatrix(t *testing.T) {
 	for _, m := range msgs {
 		covered[m.Type] = true
 	}
-	for id := 0; id < 256; id++ {
+	for id := range 256 {
 		if asdu.TypeID(id).Supported() && !covered[asdu.TypeID(id)] {
 			t.Errorf("%s is not in the matrix", asdu.TypeID(id))
 		}
@@ -327,8 +327,8 @@ func relocate(a *asdu.ASDU, loc *time.Location) {
 	for i, obj := range a.Objects {
 		v := reflect.New(reflect.TypeOf(obj)).Elem()
 		v.Set(reflect.ValueOf(obj))
-		for j := 0; j < v.NumField(); j++ {
-			ts, ok := v.Field(j).Interface().(asdu.Timestamp)
+		for _, field := range v.Fields() {
+			ts, ok := field.Interface().(asdu.Timestamp)
 			if !ok || ts.IsZero() {
 				continue
 			}
@@ -339,7 +339,7 @@ func relocate(a *asdu.ASDU, loc *time.Location) {
 				// Only minute, second and millisecond are on the wire.
 				ts.Time = time.Date(1, 1, 1, 0, wall.Minute(), wall.Second(), wall.Nanosecond(), loc)
 			}
-			v.Field(j).Set(reflect.ValueOf(ts))
+			field.Set(reflect.ValueOf(ts))
 		}
 		a.Objects[i] = v.Interface().(asdu.InformationObject)
 	}
@@ -368,7 +368,7 @@ func TestSequenceNumberWrap(t *testing.T) {
 	_, addr := serve(t, &echo{})
 	c := connect(t, addr, client.WithHandler(h))
 	ctx := context.Background()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if err := c.Send(ctx, asdu.New(asdu.CauseSpontaneous, 1, asdu.Bitstring32{IOA: 1, Value: uint32(i)})); err != nil {
 			t.Fatalf("Send %d: %v", i, err)
 		}

@@ -379,7 +379,7 @@ func TestRequestTakesOnlyItsOwnAnswers(t *testing.T) {
 			}
 			st.quiet.Store(false)
 			before := st.sent.Load()
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				if err := r.run(ctx, c, st); err != nil {
 					t.Fatalf("with a talkative station: %v", err)
 				}
@@ -415,9 +415,7 @@ func TestRequestsInPairs(t *testing.T) {
 				for round := 0; round < rounds; round++ {
 					var wg sync.WaitGroup
 					for _, r := range []int{0, 1} {
-						wg.Add(1)
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							req := a
 							if r == 1 {
 								req = b
@@ -425,7 +423,7 @@ func TestRequestsInPairs(t *testing.T) {
 							if err := req.run(ctx, c, st); err != nil {
 								t.Errorf("round %d: %s next to the other: %v", round, req.name, err)
 							}
-						}()
+						})
 					}
 					wg.Wait()
 					if t.Failed() {
@@ -454,16 +452,14 @@ func TestRequestsAllAtOnce(t *testing.T) {
 			continue
 		}
 		seen[exclusive(r.name)] = true
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 30; i++ {
+		wg.Go(func() {
+			for i := range 30 {
 				if err := r.run(ctx, c, st); err != nil {
 					t.Errorf("%s, call %d: %v", r.name, i, err)
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

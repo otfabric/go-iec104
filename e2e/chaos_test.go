@@ -226,7 +226,7 @@ func (st *chaosStation) handler() server.Handler {
 	})
 	mux.HandleFunc(asdu.C_IC_NA_1, func(s *server.Session, req *asdu.ASDU) {
 		_ = s.Confirm(req)
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			_ = s.Send(s.Context(), asdu.New(asdu.CauseInterrogatedStation, req.CommonAddr, asdu.SinglePoint{IOA: asdu.IOA(i + 1), Value: true}))
 		}
 		_ = s.Terminate(req)
@@ -389,7 +389,7 @@ func chaos(t *testing.T, seed int64, duration time.Duration) {
 		cc.c = c
 		return cc
 	}
-	for i := 0; i < nClients; i++ {
+	for i := range nClients {
 		clients = append(clients, newClient(i))
 	}
 	// Clients closed and replaced during the run; they are checked at the
@@ -434,9 +434,7 @@ func chaos(t *testing.T, seed int64, duration time.Duration) {
 	}
 
 	for slot := range clients {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cc := clients[slot]
 			rng := rand.New(rand.NewSource(seed*100 + int64(cc.idx)))
 			_ = bounded("Connect", cc.c.Connect)
@@ -565,14 +563,12 @@ func chaos(t *testing.T, seed int64, duration time.Duration) {
 					t.Errorf("client %d: %s: %v", cc.idx, what, err)
 				}
 			}
-		}()
+		})
 	}
 
 	// The station reports events, broadcasts, and drops sessions.
 	var enqueued atomic.Uint32
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		rng := rand.New(rand.NewSource(seed * 7))
 		for {
 			select {
@@ -596,11 +592,9 @@ func chaos(t *testing.T, seed int64, duration time.Duration) {
 				}
 			}
 		}
-	}()
+	})
 	// The network cuts connections.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		rng := rand.New(rand.NewSource(seed * 13))
 		for {
 			select {
@@ -610,7 +604,7 @@ func chaos(t *testing.T, seed int64, duration time.Duration) {
 				network.cut()
 			}
 		}
-	}()
+	})
 
 	time.Sleep(duration)
 	close(stop)

@@ -265,7 +265,7 @@ func TestSystemCommands(t *testing.T) {
 		if got := l.st.ClockTime(); !got.Equal(when) {
 			t.Errorf("station clock set to %v, want %v", got, when)
 		}
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			if err := c.TestCommand(ctx, l.ca); err != nil {
 				t.Fatalf("TestCommand %d: %v", i, err)
 			}
@@ -390,7 +390,7 @@ func TestRefusals(t *testing.T) {
 		// A double command state the standard does not permit.
 		negative(t, c.Command(ctx, l.ca, asdu.DoubleCommand{IOA: 501, Value: asdu.DoubleIndeterminate}), asdu.CauseActivationCon)
 		// A step beyond the end of the range: 58 steps up from 5 reach 63.
-		for i := 0; i < 58; i++ {
+		for i := range 58 {
 			if err := c.Command(ctx, l.ca, asdu.StepCommand{IOA: 505, Value: asdu.StepHigher}); err != nil {
 				t.Fatalf("step %d: %v", i, err)
 			}
@@ -461,15 +461,13 @@ func TestFileTransfer(t *testing.T) {
 		// Files and requests at the same time on one connection.
 		var wg sync.WaitGroup
 		for _, f := range l.fx.Files {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if got, err := c.GetFile(ctx, l.ca, f.IOA, f.Name); err != nil || !bytes.Equal(got, f.Content()) {
 					t.Errorf("concurrent GetFile %d: %d octets, %v", f.IOA, len(got), err)
 				}
-			}()
+			})
 		}
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			if _, err := c.Interrogate(ctx, l.ca, asdu.QOIStation); err != nil {
 				t.Errorf("Interrogate during the transfers: %v", err)
 			}
@@ -507,7 +505,7 @@ func TestDataTransfer(t *testing.T) {
 		if err := c.TestLink(ctx); err != nil {
 			t.Errorf("TestLink while stopped: %v", err)
 		}
-		for round := 0; round < 3; round++ {
+		for round := range 3 {
 			if err := c.StartDT(ctx); err != nil {
 				t.Fatalf("StartDT: %v", err)
 			}
@@ -587,7 +585,7 @@ func TestReconnect(t *testing.T) {
 				starts <- len(station.Observe(t, data))
 			}))
 		want := len(l.fx.Expected(false))
-		for round := 0; round < 3; round++ {
+		for round := range 3 {
 			select {
 			case n := <-starts:
 				if n != want {
@@ -613,12 +611,10 @@ func TestConcurrentSessions(t *testing.T) {
 		const n = 8
 		file := l.fx.Files[len(l.fx.Files)-1]
 		var wg sync.WaitGroup
-		for i := 0; i < n; i++ {
+		for i := range n {
 			c := l.dial(t)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for round := 0; round < 3; round++ {
+			wg.Go(func() {
+				for range 3 {
 					data, err := c.Interrogate(ctx, l.ca, asdu.QOIStation)
 					if err != nil || len(station.Observe(t, data)) != len(l.fx.Expected(false)) {
 						t.Errorf("client %d: Interrogate: %v", i, err)
@@ -634,7 +630,7 @@ func TestConcurrentSessions(t *testing.T) {
 						t.Errorf("client %d: Command: %v", i, err)
 					}
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		if got := len(l.st.Server.Sessions()); got != n {
@@ -958,10 +954,8 @@ func TestFileUploadAndDirectory(t *testing.T) {
 
 		// Delivering, fetching and listing at once, on one connection.
 		var wg sync.WaitGroup
-		for i := 0; i < 4; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for i := range 4 {
+			wg.Go(func() {
 				ioa := station.FirstUploadIOA + 100 + asdu.IOA(i)
 				data := bytes.Repeat([]byte{byte(i)}, 4000+i)
 				if err := c.PutFile(ctx, l.ca, ioa, 1, data[:2000], data[2000:]); err != nil {
@@ -971,9 +965,9 @@ func TestFileUploadAndDirectory(t *testing.T) {
 				if got, err := c.GetFile(ctx, l.ca, ioa, 1); err != nil || !bytes.Equal(got, data) {
 					t.Errorf("concurrent GetFile %d: %v", i, err)
 				}
-			}()
+			})
 		}
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			if _, err := c.ListFiles(ctx, l.ca, 0); err != nil {
 				t.Errorf("ListFiles during the transfers: %v", err)
 			}

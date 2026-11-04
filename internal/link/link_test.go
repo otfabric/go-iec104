@@ -297,7 +297,7 @@ func TestTestFR(t *testing.T) {
 	go func() { errc <- l.TestFR(context.Background()) }() // joins the pending test
 	time.Sleep(50 * time.Millisecond)
 	p.send(apci.NewU(apci.TestFRCon))
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := <-errc; err != nil {
 			t.Fatalf("TestFR: %v", err)
 		}
@@ -324,7 +324,7 @@ func TestAckWindowW(t *testing.T) {
 	params.W = 3
 	l, p, _ := setup(t, Controlling, params)
 	start(t, l, p)
-	for i := uint16(0); i < 6; i++ {
+	for i := range uint16(6) {
 		p.send(apci.NewI(i, 0, []byte{byte(i)}))
 		if i%3 == 2 {
 			p.expectS(i + 1)
@@ -351,7 +351,7 @@ func TestSendWindowK(t *testing.T) {
 	l, p, _ := setup(t, Controlling, params)
 	start(t, l, p)
 	ctx := context.Background()
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := l.Send(ctx, []byte{byte(i)}); err != nil {
 			t.Fatal(err)
 		}
@@ -487,7 +487,7 @@ func TestStopDTWaitsForAcknowledgement(t *testing.T) {
 	p.send(apci.NewU(apci.StartDTAct))
 	p.expectU(apci.StartDTCon)
 	eventually(t, "started", l.Started)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := l.Send(ctx, []byte{byte(i)}); err != nil {
 			t.Fatal(err)
 		}
@@ -570,7 +570,7 @@ func TestReceiveBackpressure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			b, _ := apci.NewI(uint16(i), 0, []byte{byte(i), byte(i >> 8)}).MarshalBinary()
 			if _, err := p.conn.Write(b); err != nil {
 				return
@@ -634,11 +634,11 @@ func TestThrottledLinkStillProcessesAcks(t *testing.T) {
 	start(t, l, p)
 	ctx := context.Background()
 
-	for i := 0; i < softQueue+10; i++ {
+	for i := range softQueue + 10 {
 		p.send(apci.NewI(uint16(i), 0, []byte{1}))
 	}
 	eventually(t, "soft limit", func() bool { return l.queueLen() >= softQueue })
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := l.Send(ctx, []byte{byte(i)}); err != nil {
 			t.Fatal(err)
 		}

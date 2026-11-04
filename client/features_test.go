@@ -341,7 +341,7 @@ func TestStructuredLogging(t *testing.T) {
 	_ = c.Close()
 
 	var entries []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
 		var e map[string]any
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatalf("log line is not JSON: %q", line)

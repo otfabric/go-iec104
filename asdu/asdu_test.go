@@ -265,7 +265,7 @@ func TestTypeOf(t *testing.T) {
 
 func TestSequenceEncoding(t *testing.T) {
 	a := &ASDU{Type: M_SP_NA_1, Sequence: true, Cause: CauseInterrogatedStation, CommonAddr: 1}
-	for i := 0; i < MaxObjects; i++ {
+	for i := range MaxObjects {
 		a.Objects = append(a.Objects, SinglePoint{IOA: IOA(1000 + i), Value: i%2 == 0})
 	}
 	wire, err := a.Encode(IEC104)
@@ -671,7 +671,7 @@ func TestMetadata(t *testing.T) {
 // The secure authentication types are named and carried, not modelled.
 func TestSecurityTypes(t *testing.T) {
 	n := 0
-	for id := 0; id < 256; id++ {
+	for id := range 256 {
 		typ := TypeID(id)
 		if !typ.IsSecurity() {
 			continue
@@ -734,7 +734,7 @@ func FuzzDecode(f *testing.F) {
 
 func BenchmarkEncode(b *testing.B) {
 	a := &ASDU{Type: M_ME_NC_1, Cause: CauseSpontaneous, CommonAddr: 1}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		a.Objects = append(a.Objects, MeasuredFloat{IOA: IOA(i), Value: float32(i)})
 	}
 	buf := make([]byte, 0, 249)
@@ -748,7 +748,7 @@ func BenchmarkEncode(b *testing.B) {
 
 func BenchmarkDecode(b *testing.B) {
 	a := &ASDU{Type: M_ME_TF_1, Cause: CauseSpontaneous, CommonAddr: 1}
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		a.Objects = append(a.Objects, MeasuredFloat{IOA: IOA(i), Value: float32(i), Time: At(ts)})
 	}
 	wire, err := a.Encode(IEC104)

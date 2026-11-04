@@ -79,7 +79,7 @@ func TestOrderingHandlerCalledAfterCloseFromHandler(t *testing.T) {
 		})
 	}))
 	c := connect(t, addr)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_ = c.Send(context.Background(), asdu.New(asdu.CauseActivation, 1, asdu.SingleCommand{IOA: asdu.IOA(100 + i), Value: true}))
 	}
 	time.Sleep(time.Second)
@@ -188,7 +188,7 @@ func TestOrderingSessionCallbacksOnOneGoroutine(t *testing.T) {
 	}), server.WithStateHandler(func(_ *server.Session, st iec104.State, _ error) { note(st.String()) }))
 	c := connect(t, addr)
 	ctx := context.Background()
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := c.Command(ctx, 1, asdu.SingleCommand{IOA: 1, Value: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +348,7 @@ func TestOrderingNoDuplicatesAcrossCleanStops(t *testing.T) {
 			}
 		}
 	}()
-	for round := 0; round < 40; round++ {
+	for range 40 {
 		// A command keeps the session's dispatcher busy across the stop.
 		_ = c.Send(ctx, asdu.New(asdu.CauseActivation, 1, asdu.SingleCommand{IOA: 1, Value: true}))
 		if err := c.StopDT(ctx); err != nil {

@@ -176,7 +176,7 @@ func payload(n uint32) []byte { return binary.BigEndian.AppendUint32(nil, n) }
 func TestStateChangesBeforeConfirmation(t *testing.T) {
 	ctl, ctd := pair(t, fastParams())
 	ctx := context.Background()
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		if err := ctl.link.StartDT(ctx); err != nil {
 			t.Fatalf("cycle %d: StartDT: %v", i, err)
 		}
@@ -263,9 +263,7 @@ func randomStartStopSend(t *testing.T, params apci.Params, seed int64) {
 	// sender sends numbered frames and remembers which were accepted.
 	sender := func(e *end, seed int64) *[]uint32 {
 		var sent []uint32
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rng := rand.New(rand.NewSource(seed))
 			for n := uint32(0); ; n++ {
 				select {
@@ -285,7 +283,7 @@ func randomStartStopSend(t *testing.T, params apci.Params, seed int64) {
 					time.Sleep(time.Duration(rng.Intn(200)) * time.Microsecond)
 				}
 			}
-		}()
+		})
 		return &sent
 	}
 	fromCtl := sender(ctl, seed)
@@ -293,12 +291,10 @@ func randomStartStopSend(t *testing.T, params apci.Params, seed int64) {
 
 	// Two drivers race each other over STARTDT and STOPDT.
 	var starts, stops atomic.Int64
-	for d := int64(0); d < 2; d++ {
-		drivers.Add(1)
-		go func() {
-			defer drivers.Done()
+	for d := range int64(2) {
+		drivers.Go(func() {
 			rng := rand.New(rand.NewSource(seed*10 + d))
-			for i := 0; i < 150; i++ {
+			for range 150 {
 				var err error
 				if rng.Intn(2) == 0 {
 					if err = ctl.link.StartDT(ctx); err == nil {
@@ -316,7 +312,7 @@ func randomStartStopSend(t *testing.T, params apci.Params, seed int64) {
 				}
 				time.Sleep(time.Duration(rng.Intn(300)) * time.Microsecond)
 			}
-		}()
+		})
 	}
 	drivers.Wait()
 	// Settle in the started state, let the senders run a little longer, and
@@ -380,7 +376,7 @@ func randomStartStopSend(t *testing.T, params apci.Params, seed int64) {
 // that fails because the connection ended says so, and a control call
 // returns the reason the link ended.
 func TestSendOnDyingLinkSaysWhy(t *testing.T) {
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		ctl, ctd := pair(t, fastParams())
 		ctx := context.Background()
 		if err := ctl.link.StartDT(ctx); err != nil {
@@ -388,9 +384,7 @@ func TestSendOnDyingLinkSaysWhy(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		for _, e := range []*end{ctl, ctd} {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				for n := uint32(0); ; n++ {
 					err := e.link.Send(ctx, payload(n))
 					if err == nil {
@@ -403,7 +397,7 @@ func TestSendOnDyingLinkSaysWhy(t *testing.T) {
 					}
 					return
 				}
-			}()
+			})
 		}
 		time.Sleep(time.Duration(i%5) * 100 * time.Microsecond)
 		// One side drops the connection under both senders.
@@ -427,7 +421,7 @@ func TestSendOnDyingLinkSaysWhy(t *testing.T) {
 // Close returns when the link has nothing more to say: no callback is in
 // progress or follows, unless Close is called from a callback itself.
 func TestCloseWaitsForCallbacks(t *testing.T) {
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		ctl, ctd := pair(t, fastParams())
 		ctx := context.Background()
 		if err := ctl.link.StartDT(ctx); err != nil {

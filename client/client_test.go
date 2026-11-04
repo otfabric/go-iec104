@@ -57,7 +57,7 @@ func newStation(t *testing.T, opts ...server.Option) *station {
 		}
 		_ = s.Confirm(req)
 		points := &asdu.ASDU{Type: asdu.M_SP_NA_1, Sequence: true, Cause: qoi.Cause(), CommonAddr: stationCA}
-		for i := 0; i < 40; i++ {
+		for i := range 40 {
 			points.Objects = append(points.Objects, asdu.SinglePoint{IOA: asdu.IOA(1000 + i), Value: i%2 == 0})
 		}
 		_ = s.Send(s.Context(), points)
@@ -315,7 +315,7 @@ func TestSystemCommands(t *testing.T) {
 	if !clock.Equal(now) {
 		t.Errorf("station clock = %v, want %v", clock, now)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := c.TestCommand(ctx, stationCA); err != nil {
 			t.Fatalf("TestCommand: %v", err)
 		}
@@ -771,7 +771,7 @@ func TestRequestFailsWhenConnectionDrops(t *testing.T) {
 // Close returns with the client settled: state, pending requests and all.
 func TestCloseIsSynchronous(t *testing.T) {
 	st := newStation(t)
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		c := dial(t, st.addr)
 		_ = c.Close()
 		if s := c.State(); s != iec104.StateDisconnected {

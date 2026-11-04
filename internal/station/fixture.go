@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/otfabric/go-iec104/asdu"
@@ -101,14 +102,14 @@ func (o Observed) String() string {
 
 // JoinFlags joins quality flags the way [Observed] holds them.
 func JoinFlags(flags []string) string {
-	s := ""
+	var s strings.Builder
 	for i, f := range flags {
 		if i > 0 {
-			s += " "
+			s.WriteString(" ")
 		}
-		s += f
+		s.WriteString(f)
 	}
-	return s
+	return s.String()
 }
 
 // Expected returns what the station reports for the points selected by

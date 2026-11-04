@@ -104,8 +104,7 @@ func main() {
 	fmt.Printf("interrogation: %d ASDUs, error %v\n", len(data), err)
 
 	err = c.Command(ctx, 1, asdu.SingleCommand{IOA: 6001, Value: true})
-	var neg *iec104.NegativeError
-	if errors.As(err, &neg) {
+	if neg, ok := errors.AsType[*iec104.NegativeError](err); ok {
 		fmt.Println("command refused:", neg.Cause())
 	} else {
 		fmt.Println("command:", err)

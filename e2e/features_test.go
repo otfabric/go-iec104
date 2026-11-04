@@ -751,7 +751,7 @@ func TestUnsolicited(t *testing.T) {
 		}
 		_ = s.Send(s.Context(), asdu.New(asdu.CauseInitialized, 1, asdu.EndOfInitialization{Cause: asdu.InitLocalPowerOn}))
 		go func() {
-			for i := 0; i < events; i++ {
+			for i := range events {
 				cause := asdu.CauseSpontaneous
 				if i%2 == 1 {
 					cause = asdu.CausePeriodic
@@ -765,7 +765,7 @@ func TestUnsolicited(t *testing.T) {
 	rec := &recorder{}
 	c := connect(t, addr, client.WithHandler(rec))
 	ctx := context.Background()
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		data, err := c.Interrogate(ctx, 1, asdu.QOIStation)
 		if err != nil || len(data) != 1 {
 			t.Fatalf("Interrogate %d amid unsolicited data: %d ASDUs, %v", i, len(data), err)
@@ -824,7 +824,7 @@ func stopDuringEventStream(t *testing.T, p apci.Params) {
 		feeding := make(chan struct{})
 		go func() {
 			defer close(feeding)
-			for i := 0; i < events; i++ {
+			for i := range events {
 				if err := srv.Enqueue(asdu.New(asdu.CauseSpontaneous, l.ca, asdu.Bitstring32{IOA: 103, Value: uint32(i)})); err != nil {
 					t.Errorf("Enqueue %d: %v", i, err)
 					return
@@ -834,7 +834,7 @@ func stopDuringEventStream(t *testing.T, p apci.Params) {
 				}
 			}
 		}()
-		for round := 0; round < 8; round++ {
+		for round := range 8 {
 			time.Sleep(3 * time.Millisecond)
 			if err := c.StopDT(ctx); err != nil {
 				t.Fatalf("StopDT %d: %v", round, err)
@@ -923,12 +923,10 @@ func TestConcurrentRequestsOnOneConnection(t *testing.T) {
 	ctx := context.Background()
 	const workers, rounds = 32, 100
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for w := range workers {
+		wg.Go(func() {
 			ioa := asdu.IOA(1000 + w)
-			for i := 0; i < rounds; i++ {
+			for i := range rounds {
 				a, err := c.Read(ctx, 1, ioa)
 				if err != nil {
 					t.Errorf("worker %d: Read: %v", w, err)
@@ -945,7 +943,7 @@ func TestConcurrentRequestsOnOneConnection(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -1195,7 +1193,7 @@ func TestEveryRequestAtOnce(t *testing.T) {
 		small, large := l.fx.Files[0], l.fx.Files[len(l.fx.Files)-1]
 
 		var wg sync.WaitGroup
-		for i := 0; i < clients; i++ {
+		for i := range clients {
 			c := l.dial(t, client.WithRequestTimeout(20*time.Second))
 			upload := station.FirstUploadIOA + 500 + asdu.IOA(i)
 			data := bytes.Repeat([]byte{byte(i + 1), 0x33}, 1500+i)
@@ -1265,16 +1263,14 @@ func TestEveryRequestAtOnce(t *testing.T) {
 				},
 			}
 			for name, run := range kinds {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for round := 0; round < rounds; round++ {
+				wg.Go(func() {
+					for round := range rounds {
 						if err := run(); err != nil {
 							t.Errorf("client %d, %s, round %d: %v", i, name, round, err)
 							return
 						}
 					}
-				}()
+				})
 			}
 		}
 		wg.Wait()

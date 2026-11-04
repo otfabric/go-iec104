@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -441,10 +442,8 @@ func (t Trust) verify(der []byte, curve Curve, now time.Time, ignoreValidity boo
 		}
 		fp := Fingerprint(c)
 		spk := subjectPublicKey(c)
-		for _, f := range t.Fingerprints {
-			if f == fp {
-				return c, pub, false, nil
-			}
+		if slices.Contains(t.Fingerprints, fp) {
+			return c, pub, false, nil
 		}
 		for _, k := range t.PublicKeys {
 			if bytes.Equal(k, spk) {

@@ -304,11 +304,9 @@ func (g *Group) Close() error {
 			g.wg.Wait()
 			var wg sync.WaitGroup
 			for _, c := range g.clients {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_ = c.Close()
-				}()
+				})
 			}
 			wg.Wait()
 			// Under mu: a Switchover that was under way has finished, and
