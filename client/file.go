@@ -133,7 +133,8 @@ func (c *Client) getFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 		return nil, err
 	}
 
-	data := make([]byte, 0, ready.Length)
+	// The length is the station's claim: preallocate at most 64 KiB of it.
+	data := make([]byte, 0, min(ready.Length, 64<<10))
 	for {
 		a, o, err := f.next()
 		if err != nil {
