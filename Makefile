@@ -4,7 +4,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check coverage-pkg-check coverpkg-check cover bench fuzz chaos cross check clean interop test-interop
+.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check coverage-pkg-check coverpkg-check cover bench fuzz chaos cross check clean interop test-interop docs-check
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
@@ -17,6 +17,9 @@ export GOWORK := off
 # two versions format differently fails CI on one side or the other.
 GO_MOD_VERSION := $(shell sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1/p' go.mod | head -n1)
 GOFMT_CI = $(shell GOTOOLCHAIN=go$(GO_MOD_VERSION).0 go env GOROOT)/bin/gofmt
+
+# docsync release of docs-check (DOC-008).
+DOCSYNC_VERSION := v0.2.0
 
 # Output directory for generated binaries
 BIN_DIR := bin
@@ -166,7 +169,11 @@ test-cbsigma: ## Run the IEC 62351-5 differential tests against cB-Sigma/iec6087
 	@echo "Running the application-layer security tests against cB-Sigma/iec60870"
 	@cd interop/cbsigma && go test -count=1 -race ./...
 
-check: fmt fmt-check lint lint-ci vet vuln test coverpkg-check coverage-pkg-check examples ## Run format + lint + vet + vuln + test + per-package coverage
+# The documents against the code (DOC-008): docsync, as docs-check.yml runs it.
+docs-check: ## Check that the documents agree with the code (docsync)
+	@go run github.com/otfabric/docsync@$(DOCSYNC_VERSION) check .
+
+check: fmt fmt-check lint lint-ci vet vuln test coverpkg-check coverage-pkg-check examples docs-check ## Run format + lint + vet + vuln + test + per-package coverage
 
 clean: ## Remove generated binaries and coverage artifacts
 	@echo "Cleaning up"

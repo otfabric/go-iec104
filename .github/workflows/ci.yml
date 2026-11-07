@@ -4,8 +4,10 @@ run-name: "CI (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ githu
 on:
   push:
     branches: ["**"]
+    paths-ignore: ["**/*.md"]
   pull_request:
     branches: ["**"]
+    paths-ignore: ["**/*.md"]
 
 permissions:
   contents: read
@@ -15,6 +17,7 @@ jobs:
   ci:
     uses: otfabric/.github/.github/workflows/go-ci.yml@v3.3.1
     with:
+      policy-version: v1.4.1
       run-govulncheck: true
       coverage-min: "90"
       fuzz-time: 10s
