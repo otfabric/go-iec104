@@ -276,12 +276,18 @@ func (g *Group) Clients() []*Client
 func (g *Group) Switchover(ctx context.Context) error
 
 // On the active connection; ErrNotConnected when there is none:
-func (g *Group) Interrogate(...)        func (g *Group) CounterInterrogate(...)
-func (g *Group) Read(...)               func (g *Group) ClockSync(...)
-func (g *Group) Command(...)            func (g *Group) Deactivate(...)
-func (g *Group) TestCommand(...)        func (g *Group) ResetProcess(...)
-func (g *Group) GetFile(...)            func (g *Group) PutFile(...)
-func (g *Group) ListFiles(...)          func (g *Group) Send(...)
+func (g *Group) Interrogate(ctx context.Context, ca asdu.CommonAddr, qoi asdu.QOI) ([]*asdu.ASDU, error)
+func (g *Group) CounterInterrogate(ctx context.Context, ca asdu.CommonAddr, request, freeze uint8) ([]*asdu.ASDU, error)
+func (g *Group) Read(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) (*asdu.ASDU, error)
+func (g *Group) ClockSync(ctx context.Context, ca asdu.CommonAddr, t time.Time) error
+func (g *Group) Command(ctx context.Context, ca asdu.CommonAddr, obj asdu.InformationObject) error
+func (g *Group) Deactivate(ctx context.Context, ca asdu.CommonAddr, obj asdu.InformationObject) error
+func (g *Group) TestCommand(ctx context.Context, ca asdu.CommonAddr) error
+func (g *Group) ResetProcess(ctx context.Context, ca asdu.CommonAddr, qualifier uint8) error
+func (g *Group) GetFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16) ([]byte, error)
+func (g *Group) PutFile(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA, name uint16, sections ...[]byte) error
+func (g *Group) ListFiles(ctx context.Context, ca asdu.CommonAddr, ioa asdu.IOA) ([]asdu.FileDirectoryEntry, error)
+func (g *Group) Send(ctx context.Context, a *asdu.ASDU) error
 ```
 
 A `Group` is IEC 60870-5-104's alternative to a connection pool: several
