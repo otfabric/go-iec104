@@ -41,6 +41,14 @@ jobs:
           go-version: "1.26.x"
       - run: make coverpkg-check coverage-pkg-check
 
+  # The committed captures are byte-identical to their sources.
+  captures:
+    name: Captures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make captures-verify
+
   # The self-contained examples must keep running as they are.
   examples:
     name: Examples

@@ -159,6 +159,8 @@ go-iec104/
 │                                   with IEC TS 60870-5-7 (A-Profile)
 ├── internal/link/                  the protocol machine client and server share
 ├── internal/station/               a fixture-driven station for the tests below
+├── internal/capture/               reads and replays the recorded traffic of
+│                                   testdata/captures (tests only)
 ├── e2e/                            go-iec104 client against go-iec104 server
 ├── interop/                        tests against lib60870, OpenMUC j60870, wendy512
 │                                   (build tag "interop", needs Docker);
@@ -468,6 +470,8 @@ make cross      # cross-compile without cgo
 make fuzz       # codec fuzz targets (FUZZTIME=30s each)
 make test-cbsigma  # IEC 62351-5 against cB-Sigma/iec60870 (Go 1.26)
 make bench      # codec benchmarks
+make captures-verify    # the recorded captures are unchanged (SHA256SUMS)
+make captures-extended  # replay also the full recordings (downloads 251 MB)
 ```
 
 Tests need no hardware and no external process: client and server are tested
@@ -586,8 +590,11 @@ image lacks:
   away, not a restart of the station.
 - **Verified against four third-party stacks**, lib60870-C, j60870,
   wendy512/iec104 and cB-Sigma/iec60870, the last also for IEC 62351-5 (see
-  [Interop tests](#interop-tests)); not against certified test equipment or
-  field devices.
+  [Interop tests](#interop-tests)), and replayed against recorded traffic of
+  other software (QTester104, IEC TestServer, CERT.LV's test traces;
+  [testdata/captures](testdata/captures/README.md)); not against certified
+  test equipment or field devices, and none of the recordings comes from a
+  device that can be identified as physical.
 
 Details in [INTEROPERABILITY.md](INTEROPERABILITY.md).
 

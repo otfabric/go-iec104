@@ -24,3 +24,6 @@ coverage.out
 /examples/secure/secure
 /examples/server/server
 /examples/tls/tls
+
+# Captures fetched by make captures-fetch (testdata/captures/CACHED)
+/testdata/captures/cache/

@@ -679,6 +679,7 @@ type Timestamp struct {
 	Invalid     bool // IV
 	Substituted bool // GEN
 	SummerTime  bool // SU (CP56Time2a)
+	NoWeekday   bool // CP56Time2a day of week 0 (unused); kept on encode
 }
 func At(t time.Time) Timestamp
 func Now() Timestamp
