@@ -4,7 +4,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check coverage-pkg-check coverpkg-check cover bench fuzz chaos cross check clean interop test-interop docs-check
+.PHONY: help all build examples fmt fmt-check lint lint-ci vet vuln test e2e coverage coverage-check coverage-pkg-check coverpkg-check cover bench fuzz chaos cross check clean interop test-interop docs-check captures-verify captures-fetch captures-extended captures-oracle captures-manifest
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
@@ -28,7 +28,7 @@ TEST_PKGS := $(shell go list ./... | grep -v '/examples' | grep -v '/internal/te
 
 # Coverage counts these production packages, measured together, so that the
 # e2e suite counts for the packages it exercises. Exclusions: TESTING.md.
-COVER_PKGS := $(shell go list ./... | grep -v -e '/examples' -e '/internal/testutil' -e '/internal/station' -e '/e2e' -e '/interop' | paste -sd, -)
+COVER_PKGS := $(shell go list ./... | grep -v -e '/examples' -e '/internal/testutil' -e '/internal/station' -e '/internal/capture' -e '/e2e' -e '/interop' | paste -sd, -)
 
 # Build tag of the interop package (excluded from default ./... builds).
 INTEROP_TAGS := interop
@@ -169,11 +169,29 @@ test-cbsigma: ## Run the IEC 62351-5 differential tests against cB-Sigma/iec6087
 	@echo "Running the application-layer security tests against cB-Sigma/iec60870"
 	@cd interop/cbsigma && go test -count=1 -race ./...
 
+# Recorded traffic (testdata/captures/README.md). The committed captures run
+# in `make test`; these targets check them, fetch the full recordings that are
+# not committed, and regenerate what is derived from them.
+captures-verify: ## Check the committed captures against testdata/captures/SHA256SUMS
+	@cd testdata/captures && if command -v sha256sum >/dev/null; then sha256sum -c --quiet SHA256SUMS; else shasum -a 256 -c --quiet SHA256SUMS; fi && echo "captures: SHA256SUMS ok"
+
+captures-fetch: ## Download the captures listed in testdata/captures/CACHED into the git-ignored cache and verify their SHA256
+	@./scripts/fetch-captures.sh
+
+captures-extended: captures-fetch ## Run the capture suites over the committed and the cached captures
+	@IEC104_CAPTURE_EXTENDED=1 go test -count=1 -timeout 30m -run '^TestCapture' ./client/ ./server/
+
+captures-oracle: ## Regenerate the tshark oracle files next to the committed captures (needs tshark)
+	@IEC104_CAPTURE_ORACLE=1 go test -count=1 -run '^TestGenerateOracle$$' ./internal/capture/
+
+captures-manifest: ## Regenerate testdata/captures/manifest.json and the fuzz seeds taken from the captures
+	@IEC104_CAPTURE_GENERATE=1 go test -count=1 -run '^(TestManifest|TestGenerateFuzzSeeds)$$' ./internal/capture/
+
 # The documents against the code (DOC-008): docsync, as docs-check.yml runs it.
 docs-check: ## Check that the documents agree with the code (docsync)
 	@go run github.com/otfabric/docsync@$(DOCSYNC_VERSION) check .
 
-check: fmt fmt-check lint lint-ci vet vuln test coverpkg-check coverage-pkg-check examples docs-check ## Run format + lint + vet + vuln + test + per-package coverage
+check: fmt fmt-check lint lint-ci vet vuln captures-verify test coverpkg-check coverage-pkg-check examples docs-check ## Run format + lint + vet + vuln + test + per-package coverage
 
 clean: ## Remove generated binaries and coverage artifacts
 	@echo "Cleaning up"

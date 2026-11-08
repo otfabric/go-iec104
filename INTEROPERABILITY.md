@@ -384,5 +384,39 @@ capabilities from the image under test and runs in both directions:
 wendy512 on go-iecp5 has no station over TLS, cannot receive a file and cannot
 follow a group of connections; its image says so and the tests skip.
 
+### Recorded traffic
+
+Besides the live suite, the client and the server are tested against
+recorded traffic of other implementations
+([testdata/captures](testdata/captures/README.md)): CERT.LV's
+spicy-iec104 traces, the University of Western Macedonia IEC 104 dataset
+(QTester104 against IEC TestServer, with attacks) and Wireshark's synthetic
+coverage capture. Evidence levels: one recording of unknown origin on
+Ethernet (C), software testbeds (D), generated (E). None is traffic of a
+device that can be identified as physical.
+
+- Every APDU is decoded and encoded again: the recorded implementations
+  byte for byte. The decoded fields agree with Wireshark 4.6.9 and with
+  CERT.LV's Zeek analyzer; the differences are classified in
+  `internal/capture/oracle_test.go` (ASDUs whose length does not match their
+  type, which go-iec104 refuses whole; types it carries raw; Wireshark not
+  dissecting a reused port).
+- `client/capture_test.go` plays every recorded station against the client,
+  through `Send` and the request methods, including three file downloads and
+  three uploads. `server/capture_test.go` plays every recorded controlling
+  station against the server with `Mux` and `FileServer`.
+- Classified differences: go-iec104 states the day of the week in
+  `ClockSync` (the recorded clients send 0), calls a whole file with section
+  number 0 and numbers the last section of a file after its last section (as
+  lib60870-C v2.4.1; the recorded CERT.LV programs send 1 and the last
+  section's number), and cuts file segments at 236 octets (the recorded
+  programs at 233). The server confirms STOPDT only once its I frames are
+  acknowledged (IEC 60870-5-104 ed. 2, 5.3); the recorded IEC TestServer
+  did not wait.
+- Recorded faults of IEC TestServer, on which the client closes the
+  connection: an N(R) left over from an earlier connection, and I frames
+  after STOPDT con. Its negative confirmations of C_RP_NA_1 without the
+  qualifier octet do not decode and are dropped.
+
 It has **not** been run against certified test equipment or field devices.
 Interoperability reports are welcome.

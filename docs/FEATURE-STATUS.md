@@ -93,13 +93,30 @@ The security was derived from cB-Sigma/iec60870, not from the IEC documents, so 
 |---|---|---|---|
 | Structured logging, metrics hooks, state callbacks | ✅ | `TestStatesLogsAndMetrics` | n/a |
 
+### Recorded traffic
+
+Recordings of other implementations, replayed against the client and the server ([testdata/captures](../testdata/captures/README.md)). Evidence level C is a recording of unknown origin, D a software testbed, E generated; none is A or B.
+
+| Feature | Recorded, replayed | Level |
+|---|---|---|
+| APCI framing, TCP reassembly, sequence numbers, `k`/`w` | 681 conversations, 77,299 APDUs | C, D, E |
+| STARTDT, STOPDT, TESTFR both ways | QTester104 ↔ IEC TestServer, CERT.LV traces | C, D |
+| Station and counter interrogation | QTester104 ↔ IEC TestServer, CERT.LV traces | C, D |
+| Interrogation answered with parameters (P_ME_*) | CERT.LV `errors` | D |
+| Commands (single, double, step, set points, bitstring), confirmation, termination | CERT.LV `interrogation-commands`, UOWM attacks | C, D |
+| Read, refused | CERT.LV `errors`, UOWM attack | D |
+| Clock synchronization to the broadcast address | CERT.LV traces | D |
+| File download, upload | CERT.LV `file-read`, `file-write` (three files each) | D |
+| All type identifications, causes, SQ | Wireshark's synthetic capture | E |
+| TLS, IEC 62351-5 in real traffic, redundancy, directory, select-before-operate | none of the recordings we found | — |
+
 ## 4. Interop results
 
 Peer versions, digests and per-direction results are in [INTEROPERABILITY.md](../INTEROPERABILITY.md#verification-status). The Interop workflow runs on every push and pull request.
 
 ## 5. Not verified
 
-- Certified test equipment, field devices and any conformance test.
+- Certified test equipment, field devices and any conformance test. The recorded traffic in testdata/captures is of software (levels C to E), not of a device that can be identified as physical.
 - `t1` and `t2` behaviour against another implementation.
 - Redundancy over TLS against another implementation: iec104-interop has no cases for it.
 - IEC 62351-5 against anything other than cB-Sigma/iec60870.

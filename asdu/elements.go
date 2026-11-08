@@ -238,6 +238,12 @@ type Timestamp struct {
 	// SummerTime is the SU flag (CP56Time2a only): the time is daylight
 	// saving time.
 	SummerTime bool
+	// NoWeekday reports a CP56Time2a whose day-of-week field is 0. The
+	// field ranges 1..7 (IEC 60870-5-4, CP56Time2a); controlling and
+	// controlled stations that do not use it send 0. When it is set the
+	// encoder writes 0 again instead of the day of the week of Time, so a
+	// time tag that is passed on or mirrored keeps the octets it came with.
+	NoWeekday bool
 }
 
 // At returns a valid time tag for t.
@@ -286,7 +292,10 @@ func appendCP56(b []byte, t Timestamp, loc *time.Location) []byte {
 		hour |= 0x80
 	}
 	dow := byte(tt.Weekday() & 0x07)
-	if dow == 0 {
+	switch {
+	case t.NoWeekday:
+		dow = 0
+	case dow == 0:
 		dow = 7
 	}
 	return append(b, hour, byte(tt.Day()&0x1F)|dow<<5, byte(tt.Month()&0x0F), byte((year%100+100)%100&0x7F))
@@ -320,6 +329,7 @@ func parseCP56(b []byte, loc *time.Location) Timestamp {
 		Invalid:     b[2]&0x80 != 0,
 		Substituted: b[2]&0x40 != 0,
 		SummerTime:  b[3]&0x80 != 0,
+		NoWeekday:   b[4]&0xE0 == 0,
 	}
 	// A field outside its range, or a date that does not exist, is not a
 	// time at all: report it as the zero time, flagged invalid.

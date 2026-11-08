@@ -3,6 +3,7 @@
 package asdu
 
 import (
+	"bytes"
 	"errors"
 	"math"
 	"testing"
@@ -193,4 +194,46 @@ func FuzzCP56(f *testing.F) {
 			t.Fatalf("%v decoded as %v", ts, back.Time)
 		}
 	})
+}
+
+// TestCP56UnusedWeekday: a clock synchronization recorded between two
+// stations (testdata/captures/certlv/unknown_unknown_file-read.pcapng,
+// frames 10 and 14) carries day of week 0, which its sender does not use.
+// Decoding and encoding it again, as a controlled station does when it
+// mirrors the command in its confirmation, gives back the recorded octets
+// instead of inventing a day of the week.
+func TestCP56UnusedWeekday(t *testing.T) {
+	for _, wire := range [][]byte{
+		{0x67, 0x01, 0x06, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x9a, 0xbf, 0x08, 0x0c, 0x0e, 0x0b, 0x19},
+		{0x67, 0x01, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x9a, 0xbf, 0x08, 0x0c, 0x0e, 0x0b, 0x19},
+	} {
+		a, err := Decode(wire, IEC104)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := a.Objects[0].(ClockSync).Time
+		if !ts.NoWeekday || ts.Invalid || !ts.Equal(time.Date(2025, 11, 14, 12, 8, 49, 50_000_000, time.UTC)) {
+			t.Errorf("decoded %+v", ts)
+		}
+		back, err := a.Encode(IEC104)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(back, wire) {
+			t.Errorf("encoded % x\n   recorded % x", back, wire)
+		}
+		// The mirror a controlled station sends keeps them as well.
+		if back, _ := a.Reply(CauseActivationCon, false).Encode(IEC104); !bytes.Equal(back[3:], wire[3:]) {
+			t.Errorf("mirror % x", back)
+		}
+	}
+	// A day of week that is set comes back as set; a time built by the
+	// caller gets its day of the week.
+	b := appendCP56(nil, parseCP56([]byte{0, 0, 0, 0, 0xae, 0x0b, 0x19}, time.UTC), time.UTC)
+	if b[4] != 0xae {
+		t.Errorf("day octet 0x%02X, want 0xAE", b[4])
+	}
+	if b := appendCP56(nil, At(time.Date(2025, 11, 14, 0, 0, 0, 0, time.UTC)), time.UTC); b[4] != 0xae {
+		t.Errorf("day octet 0x%02X, want 0xAE (Friday)", b[4])
+	}
 }

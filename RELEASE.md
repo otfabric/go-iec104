@@ -1,5 +1,30 @@
 # go-iec104 Releases
 
+## v0.3.0
+
+**Date:** 2026-11-08
+**Previous release:** v0.2.0
+
+### Added
+
+- `asdu.Timestamp.NoWeekday` reports a CP56Time2a whose day-of-week field is 0, which stations that do not use it send. The encoder writes 0 again, so a time tag passed on or mirrored keeps its octets.
+
+### Fixed
+
+- A CP56Time2a with day of week 0 was decoded and encoded again with the day of the week of its date. A station mirroring a clock synchronization (`Session.Confirm`, `Session.Reply`) thus answered with other octets than it received, as recorded in testdata/captures/certlv (frames 10 and 14 of unknown_unknown_file-read.pcapng). Regression test `TestCP56UnusedWeekday`; the server replay of the recordings fails without the fix.
+- `client.Interrogate` dropped the parameters of measured values (P_ME_NA_1..P_ME_NC_1) a station reports in answer to an interrogation with cause 20..36: it took them for control-direction ASDUs. They are now collected, as recorded in unknown_unknown_errors.pcapng (frames 22 to 32, also in the logs of CERT.LV's Zeek analyzer). They still reached the `Handler`.
+- `client.PutFile` failed with `ErrProtocol` when the station called the file with a section number other than 0, as the recorded station of unknown_unknown_file-write.pcapng does (section 1, frame 53). The section number of the call of a whole file is no longer checked; that of a section still is.
+
+### Tests
+
+- Recorded traffic of other implementations, committed byte-identical under testdata/captures with SHA256SUMS, a manifest with source, revision, terms and evidence level per file, and `make captures-verify` in CI: CERT.LV's spicy-iec104 traces (pinned commit), the University of Western Macedonia IEC 104 dataset (Zenodo record 7108614: QTester104, IEC TestServer, attacks) and Wireshark's synthetic coverage capture. 12 captures, 681 conversations, 77,299 APDUs. None comes from a device that can be identified as physical: the dataset's "real RTUs" are not identifiable in its recordings, whose stations all run in VirtualBox.
+- `internal/capture` reads pcap, pcapng and gzip with Ethernet, loopback, Linux cooked and raw IP, reassembles TCP deterministically (retransmissions, out-of-order segments, several APDUs per segment, APDUs over several segments, gaps, port reuse without SYN), and checks both sides' sequence numbers, acknowledgements, windows and STARTDT/STOPDT/TESTFR, interrogation, command and file procedures.
+- Every APDU decoded and encoded again: all of the recorded implementations byte for byte. Decoded fields compared with Wireshark 4.6.9 (621,207 values in 65,302 frames) and with the logs of CERT.LV's Zeek analyzer; every difference is classified and pinned.
+- The client against every recorded station (sequence numbers rebuilt, ASDU octets as recorded), through `Send` and through `Interrogate`, `CounterInterrogate`, `Read`, `ClockSync`, `Command`, `GetFile` and `PutFile`; the server, with `Mux` and `FileServer`, against every recorded controlling station. The recorded faults of IEC TestServer are pinned: the client closes on its stale N(R) and on its I frames after STOPDT con.
+- `make captures-fetch` and `make captures-extended` run the replays over four full recordings of the dataset (29 to 75 MB, not committed), the MITM drop attack among them. Fuzz seeds for `apci.FuzzParse` and `asdu.FuzzDecode` from every APDU shape of the recordings.
+
+---
+
 ## v0.2.0
 
 **Date:** 2026-11-04

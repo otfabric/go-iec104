@@ -117,12 +117,23 @@ func (c *Client) mirrored(req, a *asdu.ASDU) bool {
 }
 
 // fromStation reports whether a is monitor-direction data from the station
-// (or stations) req addressed.
+// (or stations) req addressed. The parameters of measured values
+// (P_ME_NA_1..P_ME_NC_1) are control-direction types that a station also
+// reports in answer to an interrogation, with an "interrogated by ..."
+// cause (the type identification and cause of transmission assignments of
+// the IEC 60870-5-104 interoperability list: 110..112 with causes 20..36).
 func (c *Client) fromStation(req, a *asdu.ASDU) bool {
-	if a.Type.InControlDirection() {
+	if a.Type.InControlDirection() && !interrogatedParameter(a) {
 		return false
 	}
 	return a.CommonAddr == req.CommonAddr || c.opts.asduParams.IsBroadcast(req.CommonAddr)
+}
+
+// interrogatedParameter reports whether a is a parameter of a measured value
+// sent in answer to an interrogation.
+func interrogatedParameter(a *asdu.ASDU) bool {
+	return a.Type >= asdu.P_ME_NA_1 && a.Type <= asdu.P_ME_NC_1 &&
+		a.Cause >= asdu.CauseInterrogatedStation && a.Cause <= asdu.CauseInterrogatedGroup16
 }
 
 // processData is fromStation for a request that is answered with process

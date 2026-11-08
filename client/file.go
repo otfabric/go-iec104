@@ -255,7 +255,10 @@ func (c *Client) putFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 	unexpected := func(o asdu.InformationObject, want string) error {
 		return fmt.Errorf("%w: file transfer: got %T, want %s", iec104.ErrProtocol, o, want)
 	}
-	// call waits for the station to call the file or a section.
+	// call waits for the station to call the file or a section. The
+	// section number of the call of the file is not checked: lib60870-C
+	// sends 0, other stations the number of the first section (see
+	// testdata/captures/certlv/unknown_unknown_file-write.pcapng).
 	call := func(qualifier, section uint8, want string) error {
 		a, o, err := f.next()
 		if err != nil {
@@ -263,7 +266,7 @@ func (c *Client) putFile(ctx context.Context, req *asdu.ASDU, ioa asdu.IOA, name
 		}
 		switch v := o.(type) {
 		case asdu.FileCall:
-			if v.Qualifier&0x0f != qualifier || v.Section != section {
+			if v.Qualifier&0x0f != qualifier || (qualifier == asdu.SectionRequest && v.Section != section) {
 				return unexpected(o, want)
 			}
 			return nil

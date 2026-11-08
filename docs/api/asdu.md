@@ -1504,6 +1504,12 @@ type Timestamp struct {
 	// SummerTime is the SU flag (CP56Time2a only): the time is daylight
 	// saving time.
 	SummerTime bool
+	// NoWeekday reports a CP56Time2a whose day-of-week field is 0. The
+	// field ranges 1..7 (IEC 60870-5-4, CP56Time2a); controlling and
+	// controlled stations that do not use it send 0. When it is set the
+	// encoder writes 0 again instead of the day of the week of Time, so a
+	// time tag that is passed on or mirrored keeps the octets it came with.
+	NoWeekday bool
 }
 ```
 

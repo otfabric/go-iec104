@@ -15,6 +15,10 @@ How to run each test tier of go-iec104. What is implemented and at which evidenc
 | Benchmarks | `make bench` | none | no |
 | Examples | `make examples` | none | CI workflow, job Examples |
 | Cross-compilation | `make cross` | none | no |
+| Recorded traffic, committed captures | `make test` (the capture suites below) | none | CI workflow |
+| Recorded traffic, files unchanged | `make captures-verify` | `sha256sum` or `shasum` | CI workflow, job Captures |
+| Recorded traffic, the full recordings | `make captures-extended` | network (GitHub), 251 MB | no |
+| Recorded traffic, regenerate the tshark oracle, the manifest and the fuzz seeds | `make captures-oracle`, `make captures-manifest` | `tshark` for the oracle | no |
 | Interop with reference images | `make interop` | Docker | Interop workflow, every push and pull request |
 | IEC 62351-5 against cB-Sigma/iec60870, in process | `make test-cbsigma` | Go 1.26 (`interop/cbsigma` is a module of its own) | Interop workflow, job cB-Sigma |
 
@@ -32,6 +36,7 @@ The `Extended` workflow runs nightly: every fuzz target for 5 minutes and the ch
   - `statemachine_test.go` covers start, stop, close and switchover races.
   - `chaos_test.go` runs seeded random operations while connections are cut.
   - `hostile_test.go` sends broken framing, control fields, sequence numbers, idle and flooding peers, malformed ASDUs and out-of-turn file transfer to the server, and plays a hostile station against the client; each case checks the time bound, that a legitimate client is then served, and goroutines. `FuzzServerStream` (in `hostile_fuzz_test.go`) feeds arbitrary octets to a running server over an in-memory connection.
+- **Recorded traffic** ([testdata/captures](testdata/captures/README.md)): `internal/capture` reads the captures (pcap, pcapng, gzip), reassembles TCP and checks every conversation's sequence numbers, acknowledgements and procedures; `TestCorpusReencode` decodes and encodes every APDU; `TestOracleTshark` and `TestOracleZeek` compare the decoded fields with Wireshark's (the `*.tshark.tsv.gz` files next to the captures) and with CERT.LV's Zeek logs; `TestManifest` checks testdata/captures/manifest.json. `client/capture_test.go` plays every recorded controlled station against the client (through `Send`, and through the request and file methods), `server/capture_test.go` every recorded controlling station against the server. The comparison rules: sequence numbers are rebuilt from the live link, ASDU octets are compared as recorded, and every difference is classified in the test that finds it. `IEC104_CAPTURE_EXTENDED=1` adds the files of `make captures-fetch`.
 - **`interop`** (build tag `interop`): go-iec104 as client and as server against the images of [otfabric/iec104-interop](https://github.com/otfabric/iec104-interop). The images are pinned by digest in `interop/harness.go`, the Makefile and `.github/workflows/interop.yml`; keep the three in step.
 - **`interop/cbsigma`**: `sec` against cB-Sigma/iec60870 in memory.
 
@@ -65,12 +70,13 @@ The gate is 90% of statements in total, the same value as `coverage-min` in `.gi
 | `examples/...` | Programs, run by `make examples` |
 | `internal/testutil` | Test helpers, no production code |
 | `internal/station` | Test station for the suites, no production code |
+| `internal/capture` | Reader and replay of the recorded captures, test infrastructure; its own tests run |
 
 `interop` is outside the default build by its build tag, and `interop/cbsigma` is another module.
 
 ## Fuzz regressions
 
-The targets are `FuzzParse` in `apci`, `FuzzDecode` in `asdu` and `FuzzDecode` in `sec`. A new decoder gets a target; `make fuzz` discovers it.
+The targets are `FuzzParse` in `apci`, `FuzzDecode` in `asdu` and `FuzzDecode` in `sec`. The seeds `testdata/fuzz/<Target>/capture-*` of `apci` and `asdu` are one APDU or ASDU of every shape in the recorded captures (`make captures-manifest` writes them). A new decoder gets a target; `make fuzz` discovers it.
 
 When a target fails, `go test` writes the input to `testdata/fuzz/<Target>/` in the package; CI uploads the same directory as the artifact `fuzz-failures`. To keep it as a regression test:
 
