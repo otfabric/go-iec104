@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -289,13 +290,16 @@ func tsresol(opts []byte, bo binary.ByteOrder) time.Duration {
 	return time.Microsecond
 }
 
+// stamp converts a pcapng time stamp in units of unit (a power of ten of
+// seconds, at least a nanosecond) to a time. A stamp past 2^63 units is
+// not a time any recording has and gives the zero time.
 func stamp(ts uint64, unit time.Duration) time.Time {
-	per := uint64(time.Second / unit)
-	sec, frac := ts/per, ts%per
-	if sec > 1<<40 {
+	if ts > math.MaxInt64 {
 		return time.Time{}
 	}
-	return time.Unix(int64(sec), int64(frac)*int64(unit)).UTC()
+	t := int64(ts)
+	per := int64(time.Second / unit)
+	return time.Unix(t/per, t%per*int64(unit)).UTC()
 }
 
 // segment is the TCP payload of one frame.
